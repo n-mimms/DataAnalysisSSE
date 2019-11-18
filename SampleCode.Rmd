@@ -202,6 +202,7 @@ library(caret)
 
 #make sure outcome variable is factor:
 df_churn$is_churn %<>% as.factor()
+df_churn <- df_churn[1:100000,]
 
 #set.seed(1212)
 
@@ -263,7 +264,7 @@ registerDoParallel(cluster)
 
 #configure a train-control object
 fitControl <- trainControl(method = "cv",
-                           number = 5,
+                           number = 5,   #k-fold
                            allowParallel = TRUE)
 #https://www.rdocumentation.org/packages/caret/versions/6.0-84/topics/trainControl
 
@@ -271,7 +272,7 @@ fitControl <- trainControl(method = "cv",
 svm_churn <- train(
   is_churn ~ home_delivery + num_items_sold + flag_multiple + num_returns,
   data = churn_train,
-  method ="svmLinear",   
+  method ="LogitBoost",    #svmLinear  
   trControl = fitControl)
 
 #other possible model methods here: https://topepo.github.io/caret/available-models.html

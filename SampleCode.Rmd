@@ -1,0 +1,290 @@
+---
+title: "Sample Code"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 2
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = FALSE)
+```
+
+```{r libraries, warning = F, message = F}
+
+library(RMySQL)   #MySQL interaction
+library(dplyr)  #organization, data handling
+library(magrittr)   #pipes %<>%
+
+```
+
+This document has some sample code:
+
+#MySQL Interaction in R:
+
+Create  connection to MySQL, write queries and save results in dataframe
+
+```{r dataimport, message = F, warning = F}
+
+#database connection
+mydb <- dbConnect(MySQL(), dbname = "ToyStorey", host = 'db1.cfda.se', 
+                port = 3306, user = "toystorey", password = "toys@sse") 
+
+#save queries as strings:
+query1 <- "SELECT * FROM  Product LIMIT 1000;"
+query2 <- "SELECT * FROM  Customer LIMIT 200;"
+  
+#fetch the results from MySQL and save in a dataframe
+df_query1 <- fetch(dbSendQuery(mydb,query1), n=-1)
+
+#or load data directly from csv:
+df_churn <- read.csv("C:/Users/nickp/Documents/7313DataAnalysis/churn.csv")
+
+```
+
+
+Doing SQL code directly inside chunks: (you can theortieclay figure out the right queries, then save the queries in a string and actually pull in the data like above)
+
+```{sql connection=mydb}
+
+SELECT * FROM ReceiptProduct left join Product using(product_id) LIMIT 100;
+
+
+```
+```{sql connection=mydb}
+
+SELECT * FROM Customer where name like "%john%" LIMIT 100;
+
+```
+
+
+#Glimpse/summary of datasets:
+
+```{r glimpsing}
+
+#view top few rows:
+head(df_query1)
+
+#glimpse of variable names/types/top few rows, and #obs:
+glimpse(df_query1)
+
+#summary statistics of variable
+summary(df_query1)
+
+#psych::describe()
+#colnames(df_query1)
+
+
+```
+
+#Collapsing/Aggregating data
+
+```{r aggregations, warning = F, message= F}
+
+#Aggregate observations by date (works like SQL "GROUP BY"):
+count_by_date <- df_churn %>% 
+  group_by(date) %>%  
+  summarise(NumberObs = n(), TotalSales = sum(sales), TotalChurn = sum(is_churn))  
+#aggregate function options: https://www.rdocumentation.org/packages/dplyr/versions/0.7.8/topics/summarise
+
+#Also can use the "aggregate" function but I think it's dumb: https://www.rdocumentation.org/packages/stats/versions/3.6.1/topics/aggregate
+
+#Also can use package "data.table" (FAST):
+#aggregate the data by manufacturer:
+data_Aggregate <- data.table::setDT(df_query1)[, .(
+  #aggregate functions:
+  Total_value = sum(price),
+  Count = .N,
+  Avg_cost = mean(cost)), by = c("manufacturer")]
+#https://cran.r-project.org/web/packages/data.table/vignettes/datatable-intro.html
+
+
+```
+
+#Tables:
+
+```{r tables}
+
+#basic frequency table of variable:
+table(df_query1$is_return)
+
+#clean output
+library(knitr)
+kable(df_query1)
+#https://www.rdocumentation.org/packages/kableExtra/versions/1.1.0/topics/kable_styling   options in package kableExtra
+
+#cool, clickable/sortable/searchable html table:
+library(DT)
+DT::datatable(df_query1)
+
+```
+
+
+#Basic Visualizations:
+
+```{r dataViz}
+
+#basic boxplot of sales;
+boxplot(df_churn[,"sales"],horizontal=TRUE, main="Box plot of sales")
+
+#density plot
+ggplot(df_churn, aes(x=margin)) + geom_density()   
+#density plot, by GROUP
+ggplot(df_churn, aes(x=margin)) + 
+  geom_density(aes(group=home_delivery, colour=home_delivery, fill=home_delivery), alpha=0.3) +
+           ggtitle("Distribution of margins, by home_delivery")  
+#options: http://www.sthda.com/english/wiki/ggplot2-density-plot-quick-start-guide-r-software-and-data-visualization
+
+#basic scatterplot:
+ggplot(df_count_by_date, aes(x=date, y=TotalChurn)) + geom_point() +
+           ggtitle("Number Non-returning first-time customers on each day of 2015:") +
+           xlab("Date") + ylab("Number of Transactions")
+#options: http://www.sthda.com/english/wiki/ggplot2-scatter-plots-quick-start-guide-r-software-and-data-visualization
+
+#basic histogram
+hist(df_churn$margin)
+#options: http://www.sthda.com/english/wiki/ggplot2-histogram-plot-quick-start-guide-r-software-and-data-visualization
+
+#Cool interactive html widgets (easy adaptations of ggplot tables):
+#https://www.htmlwidgets.org/showcase_plotly.html
+
+
+```
+
+#Correlations and correlograms
+
+```{r Correlations, eval = F}
+
+#Correlation matrix of feature columns
+featureCols <- c("home_delivery","num_items_sold","sales" ,"margin" , "shipping_cost" , "discount", "flag_unknown", "flag_multiple" ,"num_returns","is_churn") 
+cormat <-cor(df_churn[,featureCols])  #make correlation matrix
+
+#Correlogram
+library(corrplot) 
+corrplot(cormat, method="number")   #colorful visualization of correlation matrix
+
+#p-values of correlation matrix:
+library(Hmisc) 
+rcorr(as.matrix(df_churn2[,goodCols]))
+
+```
+
+
+#Regressions:
+
+```{r Regress, eval = F}
+
+library(stargazer) #For neat output of regression tables
+#Run OLS regressions, creating regression object:
+r1 <- lm(log_gas_cons ~ real_carbontaxexclusive_with_vat +  real_carbontax_with_vat + d_carbontax + t, data = table3data)
+r2 <- lm(log_gas_cons ~ real_carbontaxexclusive_with_vat +  real_carbontax_with_vat + d_carbontax + t + real_gdp_cap_1000, data = table3data)
+r3 <- lm(log_gas_cons ~ real_carbontaxexclusive_with_vat +  real_carbontax_with_vat + d_carbontax + t + real_gdp_cap_1000 + urban_pop, data = table3data)
+r4 <- lm(log_gas_cons ~ real_carbontaxexclusive_with_vat +  real_carbontax_with_vat + d_carbontax + t + 
+           real_gdp_cap_1000 + urban_pop + unemploymentrate, data =table3data)
+
+#pretty output
+stargazer(r1, r2, r3, r4, type = "text")
+# R package version 5.2.2. https://CRAN.R-project.org/package=stargazer 
+
+```
+
+
+#Model Building and Evaluation:
+
+Using R's [**caret**](https://cran.r-project.org/web/packages/caret/caret.pdf) package.
+
+##Split into training and testing data:
+
+```{r}
+
+library(caret)
+
+#make sure outcome variable is factor:
+df_churn$is_churn %<>% as.factor()
+
+#set.seed(1212)
+
+#partition the data evenly along the target variable: 80% will be training, 20% testing (alt. 70-30)
+training.indices <- createDataPartition(df_churn$is_churn, p = 0.8, list = F)
+
+#training data set
+churn_train <- df_churn[training.indices,]
+
+#testing data set
+churn_test <- df_churn[-training.indices,]
+
+```
+
+##Train a model: 
+
+```{r, eval = F}
+
+#Train the model (DONT RUN. use parallel processing):
+svm_churn <- train(
+  is_churn ~ home_delivery + num_items_sold + flag_multiple + num_returns,
+  data = churn_train,
+  method ="svmLinear")   #using svm inear
+
+#change "method" based on model you want to use:
+#https://rdrr.io/cran/caret/man/models.html
+#https://topepo.github.io/caret/available-models.html
+  
+```
+
+##Model Evaluation:
+
+```{r}
+
+## EVALUATION 
+#make predictions, using the generated model, on the previously-saved test data
+churn_svm_prediction <- predict(svm_churn, churn_test)
+
+#create "confusion matrix": Calculates a cross-tabulation of observed and predicted classes with associated statistics.
+confusionMatrix(churn_svm_prediction, churn_test$is_churn)
+
+```
+
+##Train Model using Parallel Processing (FASTER!)
+
+Same as above, but we use multiple cores so it goes quicker:
+Read about it [here](https://nceas.github.io/oss-lessons/parallel-computing-in-r/parallel-computing-in-r.html). 
+
+```{r}
+
+library(parallel)
+library(doParallel)
+
+start.time <- Sys.time()  #measure how much time it takes
+
+#register cluster
+cluster <- makeCluster(detectCores() - 1) # convention to leave 1 core for OS
+registerDoParallel(cluster)
+
+#configure a train-control object
+fitControl <- trainControl(method = "cv",
+                           number = 5,
+                           allowParallel = TRUE)
+#https://www.rdocumentation.org/packages/caret/versions/6.0-84/topics/trainControl
+
+#re-run same model, but with train-control object:
+svm_churn <- train(
+  is_churn ~ home_delivery + num_items_sold + flag_multiple + num_returns,
+  data = churn_train,
+  method ="svmLinear",   
+  trControl = fitControl)
+
+#other possible model methods here: https://topepo.github.io/caret/available-models.html
+
+#de-register parallel processing cluster:
+stopCluster(cluster)
+registerDoSEQ()     #forces R to return to single-thread processing
+
+#measure passed time:
+end.time <- Sys.time()
+time.taken <- end.time - start.time
+time.taken
+
+```
+
+

@@ -28,7 +28,7 @@ Create  connection to MySQL, write queries and save results in dataframe
 ```{r dataimport, message = F, warning = F, eval = T}
 
 #database connection
-mydb <- dbConnect(MySQL(), dbname = "ToyStorey", host = 'db1.cfda.se', 
+mydb <- dbConnect(MySQL(), dbname = "ToyStorey", host = 'db.cfda.se', 
                 port = 3306, user = "toystorey", password = "toys@sse") 
 
 #save queries as strings:
@@ -48,8 +48,7 @@ Doing SQL code directly inside chunks: (you can theortieclay figure out the righ
 
 ```{sql connection=mydb}
 
-SELECT * FROM ReceiptProduct left join Product using(product_id) LIMIT 100;
-
+SELECT * FROM IZettle.IZettleAR  LIMIT 100; 
 
 ```
 ```{sql connection=mydb}
@@ -166,7 +165,7 @@ corrplot(cormat, method="number")   #colorful visualization of correlation matri
 
 #p-values of correlation matrix:
 library(Hmisc) 
-rcorr(as.matrix(df_churn2[,goodCols]))
+rcorr(as.matrix(df_churn2[,featureCols]))
 
 ```
 
@@ -182,6 +181,7 @@ r2 <- lm(log_gas_cons ~ real_carbontaxexclusive_with_vat +  real_carbontax_with_
 r3 <- lm(log_gas_cons ~ real_carbontaxexclusive_with_vat +  real_carbontax_with_vat + d_carbontax + t + real_gdp_cap_1000 + urban_pop, data = table3data)
 r4 <- lm(log_gas_cons ~ real_carbontaxexclusive_with_vat +  real_carbontax_with_vat + d_carbontax + t + 
            real_gdp_cap_1000 + urban_pop + unemploymentrate, data =table3data)
+summary(r1) #output
 
 #pretty output
 stargazer(r1, r2, r3, r4, type = "text")
@@ -216,6 +216,7 @@ churn_train <- df_churn[training.indices,]
 churn_test <- df_churn[-training.indices,]
 
 ```
+
 
 ##Train a model: 
 
@@ -252,7 +253,7 @@ confusionMatrix(churn_svm_prediction, churn_test$is_churn)
 
 ##Train Model using Parallel Processing (FASTER!)
 
-Same as above, but we allow the train function to use multiple cores so it goes quicker:
+Same as above, but we allow the train function to use multiple cores so it goes quicker (training can otherwise take forever):
 Read about parallel processing [here](https://nceas.github.io/oss-lessons/parallel-computing-in-r/parallel-computing-in-r.html). 
 
 ```{r}

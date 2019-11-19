@@ -11,7 +11,7 @@ output:
 knitr::opts_chunk$set(echo = TRUE, eval = FALSE)
 ```
 
-```{r libraries, warning = F, message = F}
+```{r libraries, warning = F, message = F, eval = T}
 
 library(RMySQL)   #MySQL interaction
 library(dplyr)  #organization, data handling
@@ -25,7 +25,7 @@ This document has some sample code:
 
 Create  connection to MySQL, write queries and save results in dataframe
 
-```{r dataimport, message = F, warning = F}
+```{r dataimport, message = F, warning = F, eval = T}
 
 #database connection
 mydb <- dbConnect(MySQL(), dbname = "ToyStorey", host = 'db1.cfda.se', 
@@ -206,7 +206,7 @@ df_churn <- df_churn[1:100000,]
 
 #set.seed(1212)
 
-#partition the data evenly along the target variable: 80% will be training, 20% testing (alt. 70-30)
+#partition the data along the target variable: 80% will be training, 20% testing (alt. 70-30)
 training.indices <- createDataPartition(df_churn$is_churn, p = 0.8, list = F)
 
 #training data set
@@ -219,21 +219,25 @@ churn_test <- df_churn[-training.indices,]
 
 ##Train a model: 
 
+Use "train" function of *caret* to train a model (specifying classification or regression). See available models within caret [here](https://topepo.github.io/caret/available-models.html).
+
 ```{r, eval = F}
 
-#Train the model (DONT RUN. use parallel processing):
+#Train the model (DONT RUN -- SLOW. use parallel processing seen below):
 svm_churn <- train(
   is_churn ~ home_delivery + num_items_sold + flag_multiple + num_returns,
   data = churn_train,
-  method ="svmLinear")   #using svm inear
+  method ="svmLinear")   #using svm linear -- change method here
 
 #change "method" based on model you want to use:
 #https://rdrr.io/cran/caret/man/models.html
-#https://topepo.github.io/caret/available-models.html
+#add a "trainControl" object for better specification!
   
 ```
 
 ##Model Evaluation:
+
+Basic prediction and evaluation (confusion matrix) of the model built.
 
 ```{r}
 
@@ -248,8 +252,8 @@ confusionMatrix(churn_svm_prediction, churn_test$is_churn)
 
 ##Train Model using Parallel Processing (FASTER!)
 
-Same as above, but we use multiple cores so it goes quicker:
-Read about it [here](https://nceas.github.io/oss-lessons/parallel-computing-in-r/parallel-computing-in-r.html). 
+Same as above, but we allow the train function to use multiple cores so it goes quicker:
+Read about parallel processing [here](https://nceas.github.io/oss-lessons/parallel-computing-in-r/parallel-computing-in-r.html). 
 
 ```{r}
 
@@ -269,10 +273,10 @@ fitControl <- trainControl(method = "cv",
 #https://www.rdocumentation.org/packages/caret/versions/6.0-84/topics/trainControl
 
 #re-run same model, but with train-control object:
-svm_churn <- train(
+logit_churn <- train(
   is_churn ~ home_delivery + num_items_sold + flag_multiple + num_returns,
   data = churn_train,
-  method ="LogitBoost",    #svmLinear  
+  method ="LogitBoost",    #boosted logistic 
   trControl = fitControl)
 
 #other possible model methods here: https://topepo.github.io/caret/available-models.html

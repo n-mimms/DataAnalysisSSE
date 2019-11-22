@@ -48,7 +48,7 @@ Doing SQL code directly inside chunks: (you can theortieclay figure out the righ
 
 ```{sql connection=mydb}
 
-SELECT * FROM IZettle.IZettleAR  LIMIT 100; 
+SELECT * FROM IZettle.IZettleAR  LIMIT 1000; 
 
 ```
 ```{sql connection=mydb}
@@ -202,7 +202,6 @@ library(caret)
 
 #make sure outcome variable is factor:
 df_churn$is_churn %<>% as.factor()
-df_churn <- df_churn[1:100000,]
 
 #set.seed(1212)
 
@@ -228,7 +227,7 @@ Use "train" function of *caret* to train a model (specifying classification or r
 svm_churn <- train(
   is_churn ~ home_delivery + num_items_sold + flag_multiple + num_returns,
   data = churn_train,
-  method ="svmLinear")   #using svm linear -- change method here
+  method ="LogitBoost")   #using boosted logist  -- change method here, e.g. svmLinear
 
 #change "method" based on model you want to use:
 #https://rdrr.io/cran/caret/man/models.html
@@ -243,7 +242,7 @@ Basic prediction and evaluation (confusion matrix) of the model built.
 ```{r}
 
 ## EVALUATION 
-#make predictions, using the generated model, on the previously-saved test data
+#make predictions, using the generated model, on the previously-saved test (or cross-validation) data
 churn_svm_prediction <- predict(svm_churn, churn_test)
 
 #create "confusion matrix": Calculates a cross-tabulation of observed and predicted classes with associated statistics.
@@ -272,6 +271,8 @@ fitControl <- trainControl(method = "cv",
                            number = 5,   #k-fold
                            allowParallel = TRUE)
 #https://www.rdocumentation.org/packages/caret/versions/6.0-84/topics/trainControl
+#read about cross validation methods: http://www.sthda.com/english/articles/38-regression-model-validation/157-cross-validation-essentials-in-r/
+
 
 #re-run same model, but with train-control object:
 logit_churn <- train(

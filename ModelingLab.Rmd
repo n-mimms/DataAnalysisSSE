@@ -21,15 +21,17 @@ library(magrittr)  #for pipes
 #library(Hmisc)   #for correlation matrix with p-values
 ```
 
+\newpage
+
 #Summary:
 
-**Business Use Case**: Predict whether a customer will churn (i.e. whether a customer will not return). 
+**Business Use Case**: Predict whether a customer will churn (i.e. whether a customer has only made one purchase). 
 
 During an initial foray into modeling, we trained several models using the following (subset of) variables. 
 
 **Target**: *is_churn*: "1 if customer did NOT return, 0 if customer did return"
 
-**Features**: as defined in "Exploratory Data Analysis" Lab. *(NOTE: subset rather arbitrarily picked at this point)*
+**Features**: as defined in "Exploratory Data Analysis" Lab. 
 
 
 - *home_delivery*: Binary variable (1 if home delivery, 0 if collected in store)
@@ -42,19 +44,31 @@ During an initial foray into modeling, we trained several models using the follo
 - *flag_multiple*: Binary variable (1 if customer made several purchases the same day, 0 if they did not)
 - *num_returns*: Whether or not one or more products in the order have been returned
 
-**Models Evaluated**: And their Accuracies *(NOTE: May want to prioritize a different metric over Accuracy later)*
+*(NOTE: the above feature subset was rather arbitrarily chosen at this point)*
 
-- Logistic Regression:  
-- LDA Model: 
-- QDA Model: 
-- CART Model: 
-- SVM Model: 
-- Random Forest: 
+**Models Evaluated**: And their Accuracies 
+
+The following models were fitted with the specification of "is_churn ~." with the above features. Every model has an identical train control object that does a 5-fold cross validation. 
+
+
+| Model Type     | Accuracy |
+|----------------|----------|
+| Logistic model | 0.5774   |
+| LDA model      | 0.5775   |
+| QDA model      | 0.4437   |
+| CART model     | 0.5808   |
+| SVM model      | 0.5774   |
+| Random Forest  | 0.5792   |
+
+*(NOTE: We may want to prioritize a different metric over Accuracy later)*
+
 
 **Final Model** 
 
-Based simply on the accuracy measures of the above models in our initial model evaluation (before feature selection and further fine-tuning), we choose XYZ model. (*This will likely change upon more fine-tuning/ redefining variables/ choosing different features)
+Based simply on the accuracy measures of the above models in our initial model evaluation (before feature selection and further fine-tuning), we choose the **CART model**. (This will likely change upon more fine-tuning/ redefining variables/ choosing different features).
 
+
+\newpage
 
 #Data Preparation: 
 
@@ -66,7 +80,7 @@ Based simply on the accuracy measures of the above models in our initial model e
 #sql_con = dbConnect(MySQL(), dbname = "ToyStorey", host = "db.cfda.se", 
 #                port = 3306, user = "toystorey", password = "toys@sse") 
 
-#Copy final SQL query from Canvas:
+#SQL query 
 #finalquery <- "SELECT Receipt.customer_id, Receipt.date, Receipt.home_delivery, COUNT(ReceiptProduct.receipt_id) AS num_sold_items, IF(Receipt.home_delivery = 1 AND SUM(IFNULL(Product.price, 0)) < 200, 70, 0) AS shipping_cost, SUM(IFNULL(Product.price, 0)) * (IF(Receipt.discount_code = 'MA20GIC', 0.2, IF(Receipt.discount_code = 'M2GI5C', 0.25, 0))) AS discount, SUM(IFNULL(Product.price, 0)) AS sales, MAX(IF(ReceiptProduct.product_id = 99997, 1, 0)) AS flag_unknown, IF(COUNT(DISTINCT Receipt.receipt_id) > 1, 1, 0) AS flag_multiple, SUM(ReceiptProduct.is_return) AS flag_returns, IF(NumPurchasesPerCustomer.num_purchases = 1, 1, 0) AS is_churn FROM Receipt LEFT JOIN Receipt r_before ON (Receipt.customer_id = r_before.customer_id AND Receipt.date < r_before.date)  LEFT JOIN ReceiptProduct ON (Receipt.receipt_id = ReceiptProduct.receipt_id) LEFT JOIN Product ON (ReceiptProduct.product_id = Product.product_id) LEFT JOIN NumPurchasesPerCustomer ON NumPurchasesPerCustomer.customer_id = Receipt.customer_id WHERE r_before.date IS NULL GROUP BY Receipt.customer_id;"
   
 #fetch the results and save as df
@@ -102,7 +116,7 @@ churn_train <- df_churn[training.indices,]
 churn_test <- df_churn[-training.indices,]
 
 #Sum of churn in training set:
-sum(churn_train$is_churn %>% as.numeric())
+#sum(churn_train$is_churn %>% as.numeric())
 
 
 ```
@@ -249,7 +263,7 @@ churn_LDA_model = caret::train(
 #train a QDA model:
 churn_QDA_model = caret::train(
   is_churn ~.,
-  data = churn_train,
+  data = churn_train[,-c(6)],  #get rid of cols causing rank deficiency
   trControl = trainControl(method = "cv", number = 5),   #5 kfold valid. 
   method = "qda"   
 )
@@ -389,15 +403,46 @@ confusionMatrix(svm.pred.churn, churn_test$is_churn)
 ```
 
 
+
+#Bagging, Boosting, Random Forests:
+
+Regression and classification trees (CART above, e.g.) have pros and cons:
+Pros: 
+
+- very intuitive
+- mirror human behavior (more than other regression/classification)
+- conducive to graphics, can be interpreted by anyone
+- don't need dummy variables
+
+Cons:
+
+- lower predictive accuracy than other methods
+- not robust (classifications are susceptible to minor changes in the data)
+
+To improve these trees' predictions, you can use bagging, random forests, and boosting. (ISLR 315)
+
+
+##Bagged Tree:
+
+Simple Decision trees suffer from high variance -- repeating a training with new training data can give you a very different tree. **Bootstrap aggregation**, or bagging, is a general method for reducing variance of a statistical learning method (not just for decision trees).
+
+To reduce the variance (and thus increase prediction accuracy) of a statistical learning method, you can take many training sets from a population, build separate prediction models, and average the resultant predictions. Since we do not have multiple training sets, we simply **bootstrap**, or take repeated samples (B different bootstrapped training data sets) from our one training set, including all p predictors. (ISLR 316)
+
+Bagging is particularly useful for decision trees. These trees are deep (long paths, root to leaf) and are not pruned (many nodes). Every tree thus has high variance (may not match other trees with different trains) and low bias (fits data well). You reduce the variance by averaging all of the trees. With regressions, the "average result" is an average. With classifications, the "average result" is some sort of *majority vote* between the B-many trees ("Is it a 1 or 0?"). (ISLR 317)
+
+**However**, even though we have a lower-variance/higher-accuracy tree, The bagged tree is less interpretable: There is no easy way to represent a *single* tree because the bagged tree is an 'average'. In order to determine variable importance in bagged trees, you can use *RSS* (regression trees) or *Gini index* (classification trees). (ISLR 319)
+
 ##Random Forest:
+
+Random forests tweaks the method of bagged trees. They start the same way: buildign multiple trees using bootstrapped training samples. However, instead of using all p predictors, we use a random subset of m (m<p) predictors as split candidates. Each bootstrap sample uses a different m subset. (The default m is sqrt(p), e.g. a subset of 4 random variables out of 14 total. When m=p, a random forest is merely a bagged tree). 
+
+Only allowing a smaller subset of splits prevents all trees from being highly correlated with each other---for instance, if all the p-variable bagged trees have the same strong-predictor first 'split', then their average won't reduce variance that much. Randomly subsetting variables (possible splits) prevents that, as some trees won't have the same first split. This is thus a *decorrelation* of the bagged trees.
 
 Tuning a random forest using caret: https://machinelearningmastery.com/tune-machine-learning-algorithms-in-r/
 
 
 ```{r}
 
-
-#mtry argument: Number of variables randomly sampled as candidates at each split. Note that the default values are different for classification (sqrt(p) where p is number of variables in x) and regression (p/3)
 
 set.seed(123)
 
@@ -409,9 +454,6 @@ start.time <- Sys.time()  #measure how much time it takes
 #register cluster
 cluster <- makeCluster(detectCores() - 1) # convention to leave 1 core for OS
 registerDoParallel(cluster)
-
-#mtry: Number random variables selected
-#ntree: number of trees
 
 #Tune it better with: https://rpubs.com/phamdinhkhanh/389752
 
@@ -448,6 +490,25 @@ RF.CM
 ```
 
 
+##Boosted Tree:
+
+Boosting can be generally applied; here, it is applied to trees.
+
+In boosting, 
+
+- the full training data is used at once (no bootstrapping)
+- trees are grown *sequentially*: Every subsequent tree is grown using information from previous trees
+
+Instead of hard-fitting the data to a tree all at once (which can cause over-fitting), boosting learns slowly. Subsequent fitting is done to the *residuals* (not the outcome Y) of of the current model, and the new decision tree is incorporated into the fitted function, updating the residuals.  (ISLR 321)
+
+Tuning parameters:
+
+- **number of trees B:** can over-fit if too large! (Unlike bagging/RF). Use cross-validation to select.
+- **shrinkage parameter $\lambda$:** a small positive number to control how fast it learns (~0.01 or 0.001)
+- **number of splits in each tree d:** often d=1 (a "stump"), where boosting is then an additive model, adding one variable at a time. Otherwise, d might be used as *interaction depth*.
+
+With R **caret**, you can use method = "ada".
+
 
 #Feature selection:
 
@@ -455,9 +516,9 @@ RF.CM
 
 Choosing a subset of the predictors.
 
-**Best Subset Selection**: Fitting a separate least squares regression for *every* possible combination of the *p* predictors, totaling $2^p$ models. Fit all the (two, three... p)-variable models, choosing the best for each number of variables ("best" = smallest RSS), *then* the best out of all the different-many variable models (here "best" = AIC/BIC/adjusted $R^2$... you can't use RSS when there are different numbers of variables because it will choose the model with all variables -- the best one-variable model will always underperform the all-variable model in RSS). Computationally demanding! (ISLR 205)
+**Best Subset Selection**: Fitting a separate least squares regression for *every* possible combination of the *p* predictors, totaling $2^p$ models. Fit all the (two, three... p)-variable models, choosing the best for each number of variables ("best" = smallest RSS). You thus have p-many models with different numbers of predictors.  Then, select the best out of all the different-many variable models (here "best" = AIC/BIC/adjusted $R^2$... you can't use RSS when there are different numbers of variables because it will choose the model with all variables -- the best one-variable model will always underperform the all-variable model in RSS). Computationally demanding! (ISLR 205)
 
-**Forward stepwise selection**: Start with the null model with no predictors, then add one predictor at a time, selecting the best (smallest RSS/ highest $R^2$) at each step. Then, choose the best model out of all the different-many variable models (here "best" = AIC/BIC/adjusted $R^2$... you can't use RSS when there are different numbers of variables because it will choose the model with all variables). Computationally advantageous, but not guaranteed to get the "best" model if a different subset of predictors is used in higher-variable models than in lower-variable models, since you "build it up". (ISLR 207)
+**Forward stepwise selection**: Start with the null model with no predictors, then add one predictor at a time, selecting the best (smallest RSS/ highest $R^2$) at each step. You thus have p-many models with different numbers of predictors. Then, choose the best model out of all the different-many variable models (here "best" = AIC/BIC/adjusted $R^2$... you can't use RSS when there are different numbers of variables because it will choose the model with all variables). Computationally advantageous, but not guaranteed to get the "best" model if a different subset of predictors is used in higher-variable models than in lower-variable models, since you "build it up" one variable at a time. (ISLR 207)
 
 
 **Backward stepwise selection**: Same as forward, but start with all predictors, removing the least useful predictor. (ISLR 208)
@@ -659,7 +720,18 @@ cm.noPca
 
 ##eXtreme Gradient Boosting tree (XGBoost)
 
-TODODODO
+TODO better notes...
+
+Try to get rid of errors in previous iterations, and want to minimize loss. Where do we find errors, and how can I change the tree to minimize loss in each new iteration of model?
+
+FAST: it uses **gradient descent algorithm**. Calculate partical derivatives to find minima of loss function (RSS). It starts at a random point and takes a step, evaluating if higher or lower. Once it finds a local minimum, it continues for a few more steps to see if it is the true minimum (or just a local minimum). Therefore it optimizes the loss function.
+
+Overview:
+
+- good when there is lots of training data
+- good with numeric or numeric-and-cateogorial features (bad with just categorical fields)
+- not good for NLP
+- not good with small datasets
 
 Read about extreme gradient boosting with  [here](https://datascienceplus.com/extreme-gradient-boosting-with-r/).
 
@@ -668,62 +740,83 @@ From source: *"xgboost shines when we have lots of training data where the featu
 
 ```{r, eval = F}
 
-#Define Grid to search over
-#TODODODOD
+#one tutorial here: https://www.hackerearth.com/practice/machine-learning/machine-learning-algorithms/beginners-tutorial-on-xgboost-parameter-tuning-r/tutorial/
 
-xgbGrid <- expand.grid(nrounds = c(100,200),  
-                       max_depth = c(10, 15, 20, 25),
-                       colsample_bytree = seq(0.5, 0.9, length.out = 5),
-                       ## The values below are default values in the sklearn-api. 
-                       eta = 0.1,
-                       gamma=0,
-                       min_child_weight = 1,
-                       subsample = 1
+
+#Define Grid to search over
+#These contain all the hyper-parameters (see hackerearth link for explanation)
+#Use these to Tune!
+xgbGrid <- expand.grid(nrounds = c(50,100),    #max number iterations (sim. to num trees grown)
+                       max_depth = c(2,4,6),   #depth of tree
+                       colsample_bytree = seq(0.5, 0.9, length.out = 5),    #number of features supplied to a tree
+                       eta = 0.1,   #learning rate: usually between 0.01-0.3
+                       gamma=0,    #controls regularization / prevents overfitting
+                       min_child_weight = 1,   #number of instances needed in child node
+                       subsample = 1   #number of samples supplied to a tree 
                       )
 
-#Model TRAINING
-
-#set up parallelization:
-cluster <- makeCluster(detectCores() - 1) # leave 1 core for OS
-registerDoParallel(cluster)
-#configure the train-control object
-fitControl <- trainControl(method = "cv",
-                           number = 5,
-                           allowParallel = TRUE)
-
-#run with parallel processing now:
-rfi.xgbtree.model <- train(
-  isRFI ~.,
-  data = rfi.train,
+##Model TRAINING
+#train the model
+churn.xgbtree.model <- train(
+  is_churn ~.,
+  data = churn_train,
   method ="xgbTree",
-  trControl = fitControl)    #add:  tuneGrid = xgbGrid,
-
-#de-register parallel processing cluster:
-stopCluster(cluster)
-registerDoSEQ() #forces R to return to single-thread processing
-
-#View:
-#rfi.xgbtree.model
+  trControl = trainControl(method = "cv", number = 2, allowParallel = TRUE),
+  tuneGrid = xgbGrid)    
 
 #best hyperparameter values:
-rfi.xgbtree.model$bestTune
+churn.xgbtree.model$bestTune
 
 
-## EVALUATION 
-
-#make predictions, using the ada model, on the previously-sampled test data
-rfi.xgbtree.predict <- predict(rfi.xgbtree.model, rfi.test)
-
-#create "confusion matrix": Calculates a cross-tabulation of observed and predicted classes with associated statistics.
-xgbtree.cm <- confusionMatrix(rfi.xgbtree.predict, as.factor(rfi.test$isRFI))
-xgbtree.cm
-
+## Model EVALUATION 
+#run predictions and evaluate, on both train and test data:
+#create "confusion matrix": 
+xgbtree.train.cm <- confusionMatrix(predict(churn.xgbtree.model, churn_train) , churn_train$is_churn)  
+xgbtree.train.cm
+xgbtree.test.cm <-  confusionMatrix(predict(churn.xgbtree.model, churn_test) , churn_test$is_churn)
+xgbtree.test.cm
 
 ```
 
 
 ##Shallow Neural Network
 
+R's **nnet** does a shallow NN (one hidden layer).
 
+Neural Networks: Neurons are linked, and we don't know how they're linked, but they send signals through different layers.
+Input layer: Features. (Three input neurons/features in her example)
+Hidden layer: (if many layers, then deep learning)  (one hidden neuron in her example, adjusted)
+Output layer: Target
+[Tensorflow Playground](https://playground.tensorflow.org/)
+
+```{r}
+
+#library(nnet)   #simple, one-hidden-layer neural network
+
+#Grid of tuning parameters:
+#(for brute-force grid search hyperparameter tuning; else can use random search)
+nnetGrid <- expand.grid(.decay = c(0.1,  0.5), #regularization parameter (prevent over-fitting)
+                        .size = c(2,3))  #how many units are in the (single) hidden layer
+
+##Model TRAINING
+#train the model
+churn.nnet.model <- train(
+  is_churn ~.,
+  data = churn_train,
+  method ="nnet",
+  trControl = trainControl(method = "cv", number = 2, allowParallel = TRUE),
+  tuneGrid = nnetGrid,
+  verbose = T)  #print iterations or not?
+
+#can specify maxiter = X for max iterations
+#note: can always add "metric = ROC" instead of default accuracy, need to also specificy in trainControl "summaryFunction = twoClassSummary"
+
+#Model evaluation:
+nn.train.cm <- confusionMatrix(predict(churn.nnet.model, churn_train) , churn_train$is_churn)  
+nn.train.cm
+nn.test.cm <- confusionMatrix(predict(churn.nnet.model, churn_test) , churn_test$is_churn)  
+nn.test.cm
+
+```
 
 

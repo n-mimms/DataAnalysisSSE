@@ -1,0 +1,729 @@
+---
+title: "7313 Assignment 3: Modeling"
+output:
+  html_document:
+    toc: TRUE
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = FALSE)
+
+
+library(RMySQL)   #MySQL interaction
+library(dplyr)    #data handling
+library(caret)    #classification and regression training
+#library(ggplot2)   #for graphs
+library(magrittr)  #for pipes
+#library(lubridate)  #for date manipulation
+#library(corrgram) #for correlogram 1
+#library(corrplot) #for correlogram 2
+#library(Hmisc)   #for correlation matrix with p-values
+```
+
+#Summary:
+
+**Business Use Case**: Predict whether a customer will churn (i.e. whether a customer will not return). 
+
+During an initial foray into modeling, we trained several models using the following (subset of) variables. 
+
+**Target**: *is_churn*: "1 if customer did NOT return, 0 if customer did return"
+
+**Features**: as defined in "Exploratory Data Analysis" Lab. *(NOTE: subset rather arbitrarily picked at this point)*
+
+
+- *home_delivery*: Binary variable (1 if home delivery, 0 if collected in store)
+- *num_items_sold*: The number of items included in the order
+- *sales*: The total purchase amount in SEK
+- ~~*margin*: The store's margin on the order in SEK~~
+- ~~*shipping_cost*: How much the customer paid for shipping in SEK~~
+- *discount*: If a discount was applied to order
+- ~~*flag_unknown*: Binary variable (1 if order contains an item with unknown price, 0 if prices of all products are known)~~
+- *flag_multiple*: Binary variable (1 if customer made several purchases the same day, 0 if they did not)
+- *num_returns*: Whether or not one or more products in the order have been returned
+
+**Models Evaluated**: And their Accuracies *(NOTE: May want to prioritize a different metric over Accuracy later)*
+
+- Logistic Regression:  
+- LDA Model: 
+- QDA Model: 
+- CART Model: 
+- SVM Model: 
+- Random Forest: 
+
+**Final Model** 
+
+Based simply on the accuracy measures of the above models in our initial model evaluation (before feature selection and further fine-tuning), we choose XYZ model. (*This will likely change upon more fine-tuning/ redefining variables/ choosing different features)
+
+
+#Data Preparation: 
+
+##Load datasets:
+
+```{r dataimport, message = F, warning = F}
+
+#establish MySQL connection:
+#sql_con = dbConnect(MySQL(), dbname = "ToyStorey", host = "db.cfda.se", 
+#                port = 3306, user = "toystorey", password = "toys@sse") 
+
+#Copy final SQL query from Canvas:
+#finalquery <- "SELECT Receipt.customer_id, Receipt.date, Receipt.home_delivery, COUNT(ReceiptProduct.receipt_id) AS num_sold_items, IF(Receipt.home_delivery = 1 AND SUM(IFNULL(Product.price, 0)) < 200, 70, 0) AS shipping_cost, SUM(IFNULL(Product.price, 0)) * (IF(Receipt.discount_code = 'MA20GIC', 0.2, IF(Receipt.discount_code = 'M2GI5C', 0.25, 0))) AS discount, SUM(IFNULL(Product.price, 0)) AS sales, MAX(IF(ReceiptProduct.product_id = 99997, 1, 0)) AS flag_unknown, IF(COUNT(DISTINCT Receipt.receipt_id) > 1, 1, 0) AS flag_multiple, SUM(ReceiptProduct.is_return) AS flag_returns, IF(NumPurchasesPerCustomer.num_purchases = 1, 1, 0) AS is_churn FROM Receipt LEFT JOIN Receipt r_before ON (Receipt.customer_id = r_before.customer_id AND Receipt.date < r_before.date)  LEFT JOIN ReceiptProduct ON (Receipt.receipt_id = ReceiptProduct.receipt_id) LEFT JOIN Product ON (ReceiptProduct.product_id = Product.product_id) LEFT JOIN NumPurchasesPerCustomer ON NumPurchasesPerCustomer.customer_id = Receipt.customer_id WHERE r_before.date IS NULL GROUP BY Receipt.customer_id;"
+  
+#fetch the results and save as df
+#df_churn <- fetch(dbSendQuery(sql_con,finalquery), n=-1)
+
+#or Load Adam's churn dataset directly from csv:
+df <- read.csv("C:/Users/nickp/Documents/7313DataAnalysis/churn.csv")
+
+#keep target and subset of feature variables: (feature selection later?)
+df_churn <- df[,c("is_churn","home_delivery","num_items_sold","sales","discount","flag_multiple","num_returns")]
+#df_churn <- df[,c("is_churn","home_delivery","num_items_sold","sales","margin","discount","flag_unknown","flag_multiple","num_returns")]
+#df_churn <- df[,c("is_churn","home_delivery","num_items_sold","sales","shipping_cost")]
+
+#make sure target variable is factor (for classification models; for regression models, not needed):
+df_churn$is_churn %<>% as.factor()
+
+```
+
+##Split into training/test:
+
+Split data into training and test set:
+
+```{r}
+
+set.seed(7313)
+#partition the data evenly along the dependent variable: 70% will be training, 30% testing
+training.indices <- createDataPartition(df_churn$is_churn, p = 0.7, list = F)
+
+#training data set
+churn_train <- df_churn[training.indices,]
+
+#testing data set
+churn_test <- df_churn[-training.indices,]
+
+#Sum of churn in training set:
+sum(churn_train$is_churn %>% as.numeric())
+
+
+```
+
+#Logistic Model
+
+##With "stats" package:
+
+Train a basic linear logistic regression with package **stat**'s "glm":
+
+```{r}
+
+#fit logistic regression
+glm.fit = glm(is_churn~., 
+              churn_train, 
+              family = binomial)
+#summary(glm.fit)
+
+## EVALUATION 
+#make prediction of the model on train data:
+pred = as.factor(ifelse(predict(glm.fit, churn_train, type = "response") > 0.5, 1, 0))
+#pred = predict(glm.fit, churn_train, type = "response")
+#hist(pred)
+
+#create "confusion matrix": Calculates a cross-tabulation of observed and predicted classes with associated statistics.
+acc.test = confusionMatrix(pred , churn_train$is_churn)
+acc.test
+```
+
+##With "caret" package
+
+Same thing, but with **caret**'s "train":
+
+```{r}
+
+#train a logistic model with caret:
+churn_glm_model = caret::train(
+  form = is_churn ~.,
+  data = churn_train,
+  trControl = trainControl(method = "cv", number = 2),   #number kfold valid. change test control object here:
+  method = "glm",   #linear logistic model (Change this later)
+  family = "binomial"
+)
+
+## EVALUATION 
+#make predictions, using the generated model, on train data
+#churn_glm_prediction <- predict(churn_glm_model, churn_train)   #default .50 cutoff
+churn_glm_prediction = as.factor(ifelse(predict(churn_glm_model$finalModel, churn_train, type = "response") > 0.5, 1, 0))   #custom cutoff
+
+#create "confusion matrix": Calculates a cross-tabulation of observed and predicted classes with associated statistics.
+glm.cm <- confusionMatrix(churn_glm_prediction, churn_train$is_churn)
+glm.cm
+
+```
+
+
+**Interpretation of Confusion Matrix**:
+
+Here is a wikipedia article that shows the formulas for calculating the relevant measures from the confusion matrix: https://en.wikipedia.org/wiki/Sensitivity_and_specificity
+
+    -  true positive (TP): eqv. with hit
+    -  true negative (TN): eqv. with correct rejection
+    -  false positive (FP): eqv. with false alarm, Type I error
+    -  false negative (FN): eqv. with miss, Type II error
+    -  sensitivity or true positive rate (TPR): eqv. with hit rate, recall. TPR = TP / P = TP / (TP+FN)
+    -  specificity (SPC) or true negative rate. SPC = TN / N = TN / (TN+FP)
+    -  precision or positive predictive value (PPV).  PPV = TP / (TP + FP)
+    -  negative predictive value (NPV).  NPV = TN / (TN + FN)
+    -  fall-out or false positive rate (FPR).  FPR = FP / N = FP / (FP + TN) = 1-SPC
+    -  false negative rate (FNR).  FNR = FN / (TP + FN) = 1-TPR
+    -  false discovery rate (FDR).  FDR = FP / (TP + FP) = 1 – PPV
+    -  accuracy (ACC).  ACC = (TP + TN) / (TP + FP + FN + TN)
+
+
+##Change cutoff (for classification)
+
+**Can you improve the model by lowering the cutoff?**
+
+We can vary the cutoffs in glm model and plot the accuracies:
+
+```{r}
+
+cutoffs <- seq(0.4,0.6,0.025)
+accuracy <- NULL  #initialize accuracy
+for (i in 1:length(cutoffs)){
+  cutoff <- cutoffs[i]
+  #Predicting for cut-off, confusion matrix
+  prediction <- ifelse(glm.fit$fitted.values >= cutoff, 1, 0)
+  cm <- confusionMatrix(prediction %>% as.factor(), churn_train$is_churn %>% as.factor())
+  #add to accuracy vector
+  accuracy <- c(accuracy, cm$overall["Accuracy"])   #can access different metrics (specificity, etc) in cm object
+}
+
+plot(cutoffs, accuracy, pch =19,type='b',col= "steelblue",
+     main ="Logistic Regression, accuracy vs. cut-off", xlab="Cutoff Level", ylab = "Accuracy %")
+
+```
+
+##Evaluate on Test data:
+
+Finally we want to evaluate the performance using unseen data, the test set. 
+
+```{r}
+
+#make prediction of the model on test data:
+pred.test = as.factor(ifelse(predict(glm.fit, churn_test, type = "response") > 0.45, yes = 1, no = 0))
+confusionMatrix(data = pred.test, reference = churn_test$is_churn)
+
+
+#Same thing, but with "Caret"
+
+#make predictions, using the generated model, on train data
+churn_glm_prediction2 = as.factor(ifelse(predict(churn_glm_model$finalModel, churn_test , type = "response") > 0.45, 1, 0))
+#create "confusion matrix": Calculates a cross-tabulation of observed and predicted classes with associated statistics.
+confusionMatrix(churn_glm_prediction2, churn_test$is_churn)
+
+```
+
+#Other models using caret:
+
+See a list of models available in R package for classification and regression training *caret* (and their tuning parameters) [here](https://topepo.github.io/caret/available-models.html):
+
+Various methods of estimating model accuracy with caret [here](https://machinelearningmastery.com/how-to-estimate-model-accuracy-in-r-using-the-caret-package/). (Note in the following models we just use k-fold cross validation with 5 subsets).
+
+Tuning the "trainControl" object [here](https://rdrr.io/cran/caret/man/trainControl.html).
+
+##LDA and QDA model:
+
+
+[Linear discriminant analysis](https://en.wikipedia.org/wiki/Linear_discriminant_analysis): 
+
+```{r}
+
+set.seed(4145)
+
+#train a LDA model with caret:
+churn_LDA_model = caret::train(
+  is_churn ~.,
+  data = churn_train,
+  trControl = trainControl(method = "cv", number = 5),   #5 kfold valid. 
+  method = "lda"   #LDA
+)
+
+#train a QDA model:
+churn_QDA_model = caret::train(
+  is_churn ~.,
+  data = churn_train,
+  trControl = trainControl(method = "cv", number = 5),   #5 kfold valid. 
+  method = "qda"   
+)
+
+#Posterior probabilities (odds that each entity is a 0/1)
+lda.post.prob <- churn_LDA_model %>% predict(churn_test, type="prob")
+qda.post.prob <- churn_QDA_model %>% predict(churn_test, type = "prob")
+
+#Predicted classes:
+lda.pred.churn <- churn_LDA_model %>% predict(churn_test)
+qda.pred.churn <- churn_QDA_model %>% predict(churn_test)
+
+# LDA model Accuracy rate on test data
+#mean(lda.pred.churn == churn_test$is_churn)
+
+#confusion matrix:
+lda.cm <- confusionMatrix(lda.pred.churn, churn_test$is_churn)
+lda.cm
+qda.cm <- confusionMatrix(qda.pred.churn, churn_test$is_churn)
+qda.cm
+
+```
+
+
+
+```{r, eval = F}
+#Plot of LDA with missclasified churners (NOTE this works better with fewer, non-binary features:
+
+#generate column for "correct prediction"
+ldachurn_test <- churn_test
+ldachurn_test$correct.pred = lda.pred.churn == ldachurn_test$is_churn
+
+#random subset (more plottable)
+ldachurn_test %<>% dplyr::sample_n(1000)
+
+#plot of two variables and correct class:
+qplot(sales, num_returns, data=ldachurn_test, cex=2, col=is_churn)
+#plot of same vars and whether was correct predition:
+qplot(sales, num_returns, data=ldachurn_test, cex=2, col=correct.pred)
+
+```
+
+
+##CART model:
+
+[Classification And Regression Tree (CART)](https://machinelearningmastery.com/classification-and-regression-trees-for-machine-learning/).
+
+**Using package Caret**
+
+```{r}
+
+set.seed(4145)
+
+#train a CART model with caret:
+churn_CART_model = caret::train(
+  form = is_churn ~.,
+  data = churn_train,
+  trControl = trainControl(method = "cv", number = 2),   #number kfold valid. 
+  method = "rpart"  #,   #CART
+  #control = rpart.control(minsplit = 1, minbucket = 1, cp = 0.01)#,   #control object for rpart
+  #tuneLength = 10   #number of possible cp values to evaluate: (cp = complexity parameter; penalizes tree for having too many splits) -- optimizes pruning
+)    
+
+
+plot(churn_CART_model)  #view complexity parameter values
+churn_CART_model$bestTune    #best cp value
+
+#View the final tree:
+par(xpd = NA) # Avoid clipping the text 
+plot(churn_CART_model$finalModel)
+text(churn_CART_model$finalModel,  digits = 3)
+
+# Make predictions on the test data
+cart.pred.churn <- churn_CART_model %>% predict(churn_test)
+# CART model accuracy rate on test data
+#mean(cart.pred.churn == churn_test$is_churn)
+
+#create confusion matrix:
+cart.cm <- confusionMatrix(cart.pred.churn, churn_test$is_churn)
+cart.cm
+
+#Source: http://www.sthda.com/english/articles/35-statistical-machine-learning-essentials/141-cart-model-decision-tree-essentials/
+
+```
+
+**Using Package rpart**
+
+```{r}
+
+#caret automatically prunes tree. For more control use rpart:
+#Train a tree with package rpart:
+library(rpart)
+library(rpart.plot)
+prune.control = rpart.control(minsplit = 10, minbucket = 10, cp = 0.001)
+churn_rpart_model <- rpart::rpart(
+  form = is_churn ~.,
+  data = churn_train,
+  control = prune.control)
+rpart.plot(churn_rpart_model) #plot of manually-tuned tree
+
+```
+
+
+
+##Support Vector Maching (SVM)
+
+[Support vector machine](https://en.wikipedia.org/wiki/Support-vector_machine)  
+
+*Does not scale well* -- use a subset! 
+
+
+```{r}
+
+#random sample of 10000 rows:
+svm_sample <- dplyr::sample_n(churn_train, 10000)
+
+#reclassify target:
+levels(svm_sample$is_churn) <- c("no_churn","churn")
+
+#train SVM
+churn_svm_fit = train(
+  is_churn ~.,
+  data = svm_sample,
+  trControl = trainControl(method = "cv", number = 5, savePred = T, classProb = T),    #save predictions and class probs
+  method = "svmLinear"   #svm model
+)
+
+
+# Make predictions on the test data
+svm.pred.churn <- churn_svm_fit %>% predict(churn_test)
+
+#reclassify target:
+levels(svm.pred.churn) <- c("0","1")
+
+#create confusion matrix:
+confusionMatrix(svm.pred.churn, churn_test$is_churn)
+```
+
+
+##Random Forest:
+
+Tuning a random forest using caret: https://machinelearningmastery.com/tune-machine-learning-algorithms-in-r/
+
+
+```{r}
+
+
+#mtry argument: Number of variables randomly sampled as candidates at each split. Note that the default values are different for classification (sqrt(p) where p is number of variables in x) and regression (p/3)
+
+set.seed(123)
+
+library(parallel)
+library(doParallel)
+
+start.time <- Sys.time()  #measure how much time it takes
+
+#register cluster
+cluster <- makeCluster(detectCores() - 1) # convention to leave 1 core for OS
+registerDoParallel(cluster)
+
+#mtry: Number random variables selected
+#ntree: number of trees
+
+#Tune it better with: https://rpubs.com/phamdinhkhanh/389752
+
+levels(churn_train$is_churn) <- c("0","1")
+churn_RF_model <- caret::train(is_churn~., 
+                      data=churn_train, 
+                      method='rf', 
+                      ntree = 2,
+                      trControl=trainControl(method='cv', number=2) )
+
+#de-register parallel processing cluster:
+stopCluster(cluster)
+registerDoSEQ()     #forces R to return to single-thread processing
+
+#measure passed time:
+end.time <- Sys.time()
+time.taken <- end.time - start.time
+time.taken
+
+#View how Accuracy changes with number predictors
+plot(churn_RF_model)
+
+#View final model:
+plot(churn_RF_model$finalModel)
+
+# Make predictions on the test data
+rf.pred.churn <- predict(churn_RF_model,churn_test)
+
+
+#create confusion matrix:
+RF.CM <- confusionMatrix(rf.pred.churn, churn_test$is_churn)
+RF.CM
+
+```
+
+
+
+#Feature selection:
+
+##Subset Selection:
+
+Choosing a subset of the predictors.
+
+**Best Subset Selection**: Fitting a separate least squares regression for *every* possible combination of the *p* predictors, totaling $2^p$ models. Fit all the (two, three... p)-variable models, choosing the best for each number of variables ("best" = smallest RSS), *then* the best out of all the different-many variable models (here "best" = AIC/BIC/adjusted $R^2$... you can't use RSS when there are different numbers of variables because it will choose the model with all variables -- the best one-variable model will always underperform the all-variable model in RSS). Computationally demanding! (ISLR 205)
+
+**Forward stepwise selection**: Start with the null model with no predictors, then add one predictor at a time, selecting the best (smallest RSS/ highest $R^2$) at each step. Then, choose the best model out of all the different-many variable models (here "best" = AIC/BIC/adjusted $R^2$... you can't use RSS when there are different numbers of variables because it will choose the model with all variables). Computationally advantageous, but not guaranteed to get the "best" model if a different subset of predictors is used in higher-variable models than in lower-variable models, since you "build it up". (ISLR 207)
+
+
+**Backward stepwise selection**: Same as forward, but start with all predictors, removing the least useful predictor. (ISLR 208)
+
+
+##Shrinkage methods: Lasso and Ridge Reduction
+
+Keeping all of the predictors, but *constraining* or *regularizing* their coefficient estimates towards zero. (Note: Lasso can constrain all the way to zero, effectively becoming a subset selector).
+
+**Ridge Regression:** Instead of simply minimizing the RSS as in standard least squares fitting, we minimize $RSS + \lambda \sum_{j=1}^{p} \beta_j^2$, where $\lambda \geq 0$ is a *tuning parameter*, separately determined, and the whole second term ($\lambda \sum_{j=1}^{p} \beta_j^2$) is a *shrinkage penalty*. When $\lambda$ equals 0, there is no penalty, and the ridge regression approaches least squares. As $\lambda$ approaches infinity, the coefficients for the p predictors approach 0. Coefficients are determined for every value of $\lambda$. The shrinkage penalty is *not* applied to the intercept (the mean value when other coefficients are zero). (ISLR 215)
+
+Advantage over least squares: Ridge regression gives control over the bias-variance tradeoff. Increasing $\lambda$ decreases the flexibility of the of the regression fit, thus lowering variance but increasing bias. It therefore helps prevent overfitting training data. 
+
+**Lasso:** Ridge regression doesn't allow any of the p predictors' coefficients to be zero, so the model still has all variables and is rather un-interpretable. Lasso is generally the same approach as Ridge Regression (includes a penalty term and tuning parameter), but the formula (minimize $RSS + \lambda \sum_{j=1}^{p} |\beta_j|$) now allows coefficients to be zero, effectively subsetting the features and allowing for more interpretable models. (ISLR 219)
+
+http://www.sthda.com/english/articles/37-model-selection-essentials-in-r/153-penalized-regression-essentials-ridge-lasso-elastic-net/
+
+https://web.stanford.edu/~hastie/glmnet/glmnet_alpha.html
+
+
+```{r ridgeLasso, warning=F, message = F}
+
+library(glmnet)
+
+#adapted from: https://drsimonj.svbtle.com/ridge-regression-with-glmnet
+
+#Data Preparation:
+#create matrix of predictors (remove the target, save as data matrix)
+x.train <- churn_train[,-c(1)] %>% data.matrix()
+x.test <- churn_test[,-c(1)] %>% data.matrix()
+#turn target into numeric
+y.train <- churn_train[,c(1)] %>% as.numeric()  
+y.test <- churn_test[,c(1)]
+
+#can specify grid of lambdas to search over:
+#lambdas <- 10^seq(3, -2, by = -.1)
+#Alpha = 0 for Ridge Regression
+#rr <- glmnet(x.train, y.train, alpha = 0, family = "binomial", type.measure = "class", lambda = lambdas)
+#Alpha = 1 for Lasso
+#lasso <- glmnet(x,y, alpha = 1, lambda = lambdas)
+#NOTE: you can set Alpha between 0 and 1 for "elastic net regression""
+
+#find optimal Lambdas using built-in cross validation (CV) function:
+#Ridge Regression (alpha = 0)
+rr_opt <- cv.glmnet(x.train, y.train, alpha = 0)
+rr_opt_lambda <- rr_opt$lambda.min   #lowest point = optimal lambda (best minimized error under cross validation)
+#Lasso (alpha = 1)
+lasso_opt <- cv.glmnet(x.train, y.train,  alpha = 1)
+lasso_opt_lambda <- lasso_opt$lambda.min
+
+#View the lambda plots agains MSE:
+plot(rr_opt)
+plot(lasso_opt)
+
+#create model with best lambda, then use that model to predict
+model.rr <- glmnet(x.train, as.factor(y.train), alpha = 0, family = "binomial", type.measure = "class", lambda = rr_opt_lambda)
+predict.rr <-predict(model.rr,   #model 
+                     newx = x.test,  #new x values to test
+                     type="class",
+                     s = rr_opt_lambda)  #use optimum lambda
+model.lasso <- glmnet(x.train, as.factor(y.train), alpha = 0, family = "binomial", type.measure = "class", lambda = lasso_opt_lambda)
+predict.lasso <-predict(model.lasso,  
+                     newx = x.test,
+                     type="class",
+                     s = lasso_opt_lambda)  
+
+#turn predictions into factors and make sure same levels...
+predict.rr %<>% as.factor()
+predict.lasso %<>% as.factor()
+levels(predict.rr) <- c("0","1")
+levels(predict.lasso) <- c("0","1")
+
+#View the accuracies of Ridge Regression/ Lasso models:
+confusionMatrix(predict.rr, y.test)
+confusionMatrix(predict.lasso, y.test)
+
+
+```
+
+
+##Dimension Reduction (PCA): 
+
+The methods above control variance by eliminating/restricting the original predictor variables. The following method(S) *transforms* the predictors (creating "new" predictors with linear combinations of the original p predictors), then uses least squares. This is called *Dimension reduction*. (ISLR 228)
+
+One dimension reduction method is *Principal Components Analysis* (PCA), an unsupervised learning technique that reduces the dimension of an n x p matrix X. 
+
+**First principal component**
+This method first finds the axis/direction of the data that has the highest variance, the *first principal component*. This will be a line that is closest to all n of the observations (a line of best fit). It is given by the formula:
+
+$$Z_1 = \phi_1 (x_1 - \overline{x_1}) + \phi_2 (x_2 - \overline{x_2})$$
+
+The data are projected onto this axis, creating a linear combination of the (two) data features with the highest variance out of all possible linear combinations (that is, all linear combinations where $\phi_1^2 + \phi_2^2 =1$, or else you can arbitrarily choose high coefficients for high variance). The results of this linear combination are called *z-scores* (each data point will have a z-score showing how far from the mean $x_1$ and $x_2$ the point is, *along that axis*). Thus, these z-scores are essentially single-number summaries of both predictors for each point.
+
+
+**Second (Third, fourth...) principal component**
+Then, we can find a second principal component ($Z_2$) by finding linear combinations of variables that are uncorrelated with our first component $Z_1$ and has highest variance. It will be orthogonal to the previous prior component. With only two variables, two components is maximum, but you can otherwise build up subsequent components by finding linear combinations with maximum variance combinations subject to the fact that it is uncorrelated with prior components. We can find up to p principal components with p predictors (though if we use all p principal components, it's not really "dimension reduction" is it).
+
+```{r}
+#interesting page with visuals: https://www.datacamp.com/community/tutorials/pca-analysis-r
+
+#Data Preparation:
+#remove the target (and other vars?)
+x.train <- churn_train[,-c(1)]
+x.test <- churn_test[,-c(1)]
+
+#PCA on training set (minus target!)
+pca_train <- prcomp(x.train, scale = T)
+#calculate variance
+pca_train$var <- pca_train$sdev^2
+#how much variance explained by each component
+pve <- pca_train$var/sum(pca_train$var)
+pve   
+#graph of cumulative sum of variance explained by each PC
+plot(cumsum(pve), xlab = "Principal Component", ylab = "Cum. Prop. of Var. Explained")
+
+```
+
+We can train a model using principal components as features, and compare how this model does against previous models:
+
+```{r}
+
+#new training set has y var and pca-x vars:
+train.data <- data.frame(is_churn = churn_train$is_churn, pca_train$x)
+
+#apply whatever model to pca-transformed training data
+#train a CART model with caret:
+cart.pca = caret::train(
+  form = is_churn ~.,
+  data = train.data,
+  trControl = trainControl(method = "cv", number = 2),   #number kfold valid. 
+  method = "rpart"
+)
+
+#transform test set into PCA-vars using SAME transformation (even if not "max" variance for the test set):
+pca_test <- predict(pca_train, newdata = x.test)  #note "pca_train" is a transformation pca-object that contains lots of things
+pca_test %<>% as.data.frame()
+
+#make prediction on pca-transformed test data
+cart.predict.pca <- predict(cart.pca, pca_test)
+  
+#compare model results from pca / no-pca
+cart.cm.pca <- confusionMatrix(cart.predict.pca, churn_test$is_churn)
+cart.cm.pca
+
+#compare to LDA (no PCA)
+cart.cm
+
+#When applied to CART, gets better accuracy. with LDA, it gets worse accuracy?
+```
+
+Doing the same, but within "caret" package:
+
+```{r, eval = F, echo = F}
+
+#To inclue PCA within caret "Train", use preProcess! 
+
+#create a pre-processing transformation object
+preProc <- preProcess(churn_train[,c(-1)], #don't include target
+                      method = c("pca"),   #can also center/scale/etc
+                      pcaComp = 3)  #how many PCA components to keep (up to "p")
+
+#apply (same) preprocessing to both train and test sets (minus target):
+train.pca <- predict(preProc, churn_train[,c(-1)])
+test.pca <- predict(preProc, churn_test[,c(-1)])
+#add the target variable back:
+train.pca$is_churn <- churn_train$is_churn
+test.pca$is_churn <- churn_test$is_churn
+
+#(whatever) model with PCA
+cart.pca1 = caret::train(
+  form = is_churn ~.,
+  data = train.pca,  #use transformed training data
+  trControl = trainControl(method = "cv", number = 2),   
+  method = "rpart"
+)
+pred <- predict(cart.pca1,test.pca)
+cm.pca <- confusionMatrix(pred, test.pca$is_churn)
+
+#same model without PCA
+cart.nopca1 = caret::train(
+  form = is_churn ~.,
+  data = churn_train,   #use original training data
+  trControl = trainControl(method = "cv", number = 2),   
+  method = "rpart"
+)
+
+#view accuracy with / without PCA  (on train data)
+pred <- predict(cart.nopca1,churn_test)
+cm.noPca <- confusionMatrix(pred, churn_test$is_churn)
+
+#Compare Accuracies:
+cm.pca
+cm.noPca
+
+```
+
+
+#Deep Learning:
+
+##eXtreme Gradient Boosting tree (XGBoost)
+
+TODODODO
+
+Read about extreme gradient boosting with  [here](https://datascienceplus.com/extreme-gradient-boosting-with-r/).
+
+From source: *"xgboost shines when we have lots of training data where the features are numeric or a mixture of numeric and categorical fields. It is also important to note that xgboost is not the best algorithm out there when all the features are categorical or when the number of rows is less than the number of fields (columns)."*
+
+
+```{r, eval = F}
+
+#Define Grid to search over
+#TODODODOD
+
+xgbGrid <- expand.grid(nrounds = c(100,200),  
+                       max_depth = c(10, 15, 20, 25),
+                       colsample_bytree = seq(0.5, 0.9, length.out = 5),
+                       ## The values below are default values in the sklearn-api. 
+                       eta = 0.1,
+                       gamma=0,
+                       min_child_weight = 1,
+                       subsample = 1
+                      )
+
+#Model TRAINING
+
+#set up parallelization:
+cluster <- makeCluster(detectCores() - 1) # leave 1 core for OS
+registerDoParallel(cluster)
+#configure the train-control object
+fitControl <- trainControl(method = "cv",
+                           number = 5,
+                           allowParallel = TRUE)
+
+#run with parallel processing now:
+rfi.xgbtree.model <- train(
+  isRFI ~.,
+  data = rfi.train,
+  method ="xgbTree",
+  trControl = fitControl)    #add:  tuneGrid = xgbGrid,
+
+#de-register parallel processing cluster:
+stopCluster(cluster)
+registerDoSEQ() #forces R to return to single-thread processing
+
+#View:
+#rfi.xgbtree.model
+
+#best hyperparameter values:
+rfi.xgbtree.model$bestTune
+
+
+## EVALUATION 
+
+#make predictions, using the ada model, on the previously-sampled test data
+rfi.xgbtree.predict <- predict(rfi.xgbtree.model, rfi.test)
+
+#create "confusion matrix": Calculates a cross-tabulation of observed and predicted classes with associated statistics.
+xgbtree.cm <- confusionMatrix(rfi.xgbtree.predict, as.factor(rfi.test$isRFI))
+xgbtree.cm
+
+
+```
+
+
+##Shallow Neural Network
+
+
+
+

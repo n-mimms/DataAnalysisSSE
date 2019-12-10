@@ -1,0 +1,302 @@
+---
+title: "iZettle Case: Modeling"
+output: html_notebook
+---
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+
+library(RMySQL)   #MySQL interaction
+library(dplyr)    #data handling
+library(caret)    #classification and regression training
+#library(ggplot2)   #for graphs
+library(magrittr)  #for pipes
+#library(lubridate)  #for date manipulation
+#library(corrgram) #for correlogram 1
+#library(corrplot) #for correlogram 2
+#library(Hmisc)   #for correlation matrix with p-values
+library(parallel)  #parallel processing for model training
+library(doParallel) #ditto
+
+```
+
+**Description of optional case**
+Note that this is a made up case, but based on manipulated real-world data.
+
+The toy industry has been hit hard by changed shopping patterns. Top-Toy, owner of Toys ‘R’ Us and BR-leksaker, was forced to file for bankruptcy in the end of 2018. Shopping platforms, such as Amazon, have successfully overtaken some of their former customers. But *small and medium-sized* digital-born toy stores now see potential in becoming local, physical mom-and-pop stores. 
+
+Seeing iZettle is looking to expand their business, they are curious to explore the potential in attracting toy stores. Five online toy stores have shown an explicit interest in setting up a brick and mortar store using payment solutions from iZettle.
+
+iZettle have acquired, from a third-party data provider, transaction data for the years 2014 and 2015 from twelve online toy stores, including the five stores with explicit interest. iZettle also have accessed the five last year-end reports for each of every twelve companies using the Retriever-database.
+
+iZettle are now facing many questions: Should iZettle focus on only one, several or all twelve toy stores? Since only five of the toy stores have expressed interest in iZettle, it is unknown if the other seven even knows about iZettle or are considering setting up a physical store. Should iZettle only approach companies that are explicitly interested or should they cold-call the other companies? Should they only offer iZettle readers or should they also offer micro loans, and if so – to one, several or all stores? Concurrently, iZettle are also discussing to start offering dynamic loan rates (e.g., only offer when customer purchase is above a certain limit, offer a lower rate for larger purchases, or even customer differentiated loan rates).
+
+iZettle are currently giving 60 days of credit, and charge 1.85% per transaction made with the iZettle reader and 2.5% per online transaction. The iZettle reader is 199 kr each.
+
+
+#Data Exploration: Preliminary Facts
+
+- Not much inter-store competition: 668,106 individual customers shopped at 1 store, 5667 at 2 stores, 40 at 3 stores. None shopped at more than 3.
+- All 673813 customers only use one currency type as well (no international buys)
+- 6 companies are swedish, 3 finnish, 3 norwegian. each store only lists one type of currency in transactions
+- all the 365823 blank strings("") under column 'device' are "target = 0" (i.e. are NOT desktop, but could be either Mobile, Other, Tablet, Game Console, or Smart TV)
+- there are only NULL values for columns "device" and "target". the rest of the columns are complete
+- there are only blank/"" values for columns "device","target", and "birthyear" 
+- all customers with birthyear = "" have "gender = none" (companies, not people?)
+- 204/44292 distinct customers that have a blank birthyear also have a complete birthyear (can fill them in)
+- a lot of the blank birthyears are customer ids with unusually high numbers of purchases -- customers with thousands of purchases and no birthyear/gender = companies?
+- merchants that sell large orders to non-birthdayed customers: 3642550,  2723490, 258643
+- only one store includes "none" gender when birthyear!="" (merchant 2723490); the rest of gender data appears to be 100% complete for the other 11 companies. 
+- merchants 2756123, 4218266, 5913810, 6394740, and 9402067 ONLY have non-desktop purchases (as well as NULL/redacted values..)
+- large purchase amounts tend to be desktop-only (large, genderless purchasers ONLY use non-desktop)
+-  sum(purchases) of the stores-years correspons to "turnover" in teh AR table
+
+
+
+
+#Data Preparation:
+
+##Load data from SQL:
+
+Create dataset with target and features:
+
+
+```{r dataimport, message = F, warning = F, eval = F}
+
+#establish MySQL connection:
+sql_con = dbConnect(MySQL(), dbname = "IZettle", host = "db.cfda.se", 
+                port = 3306, user = "toystorey", password = "toys@sse") 
+
+#SQL Method (worse, for me...)
+
+#SQL Queries (strings):
+#queryIdealCust <- 'SELECT *,COUNT(*), SUM(target = 0)  AS mobile_purchases, IF(COUNT(*) >1 AND SUM(target = 0) >=1, 1, 0) AS ideal_customer FROM IZettleOrder GROUP BY cid;'
+queryFirstPurchases <- 'SELECT * FROM IZettleOrder a  INNER JOIN(SELECT cid, MIN(datestamp) AS mindate, COUNT(*) from IZettleOrder GROUP BY cid) b ON a.cid = b.cid AND a.datestamp = b.mindate;'
+queryMachins <- 'SELECT * FROM IZettleOrder WHERE birthyear = "" AND gender = "none"'
+queryFIRST <- 'SELECT * FROM IZettleOrder a INNER JOIN(SELECT cid, MIN(datestamp) AS mindate, COUNT(*) from IZettleOrder GROUP BY cid) b ON a.cid = b.cid AND a.datestamp = b.mindate GROUP BY a.cid'
+
+
+#fetch the results and save as data frames:
+ideal_cust <- fetch(dbSendQuery(sql_con,queryIdealCust), n=-1)
+first_purchases <- fetch(dbSendQuery(sql_con,queryFirstPurchases), n=-1)
+first_purch <- first_purchases[,-c(12)]
+elim_nonhumans <- fetch(dbSendQuery(sql_con,queryMachins), n=-1)
+first1 <- fetch(dbSendQuery(sql_con,queryFIRST), n=-1)
+
+
+#join them
+targt <- ideal_cust[,c("cid","ideal_customer")]
+df <- left_join(first_purch, targt, by = "cid")
+df2 <- anti_join(df, elim_nonhumans, by = "cid")
+
+
+
+```
+
+```{r}
+
+#R method:
+
+
+#establish MySQL connection:
+sql_con = dbConnect(MySQL(), dbname = "IZettle", host = "db.cfda.se", 
+                port = 3306, user = "toystorey", password = "toys@sse") 
+#fetch entire Order table
+query <- 'SELECT * FROM IZettleOrder'
+data <- fetch(dbSendQuery(sql_con,query), n=-1)
+#df <- data #make copy
+#data <- df #restore
+
+#Customer aggregation ("Group by") - 673813 customers!
+customers <- data %>% 
+  group_by(cid) %>%  
+  summarise(NumberPurchases = n(), TotalSales = sum(as.numeric(purchase_amount)), 
+            #Genders
+            nGender = n_distinct(gender), Male = sum(gender == "male"), Female = sum(gender == "female"),
+            #Birthyears - paste together the different values for one customer
+            nBirthyear = n_distinct(birthyear), Birth = toString(unique(birthyear)))
+
+#Create target: customers with multiple purchases
+mult_customers <- filter(customers, NumberPurchases > 1) %>% select(cid)   #customer IDs who have bought multiple
+data$target_customer <- ifelse(data$target ==0 & data$cid %in% mult_customers$cid, 1, 0)
+
+#Clean data: 
+#fix genders (1836 have multiple, AKA "none" plus the real gender):
+customers$trueGender <- case_when(
+  customers$Male > 0 ~ "male",
+  customers$Female > 0 ~ "female",
+  TRUE ~ "none"
+)
+data <- left_join(data, customers[,c("cid","trueGender")], by = "cid")
+
+#fix Birthyears (204 have multiple)
+customers$trueBirthyear <- stringr::str_extract(customers$Birth, "[[:digit:]]+")
+data <- left_join(data, customers[,c("cid","trueBirthyear")], by = "cid")
+
+#We can see that top buyers still do not have genders or birthyears...
+#View(arrange(customers, desc(TotalSales)))
+
+#DDON'T DO THIS?
+#filter out B2B customers (genderless, birthless customers) and missing targets
+data2 <- filter(data, !is.na(target)) 
+
+
+#keep only first obsevation 
+data2$datestamp %<>% as.Date()  #turn into date
+df_final <- data2 %>%
+  group_by(cid) %>%
+  arrange(datestamp) %>%
+  slice(1L) #keep first row in grouped,arranged dataset
+
+```
+
+
+##Create target and features:
+
+
+```{r}
+
+#make sure target variable is factor (for classification models; for regression models, not needed):
+df_final$target_customer %<>% as.factor()
+levels(df_final$target_customer) <- c("nontarget","target")
+
+```
+
+
+##Split into training/test:
+
+Split data into training and test set:
+
+```{r}
+
+set.seed(7313)
+#partition the data evenly along the dependent variable: 70% will be training, 30% testing
+training.indices <- createDataPartition(df_final$target_customer, p = 0.1, list = F)
+df_final2 <- df_final[training.indices,]
+
+training.indices <- createDataPartition(df_final2$target_customer, p = 0.7, list = F)
+#training data set
+df_train <- df_final2[training.indices,]
+#testing data set
+df_test <- df_final2[-training.indices,]
+
+```
+
+
+##Create a "train control" object
+
+This train control object will apply to all models below. We use 5-fold cross validation. We choose "twoClassSummary" so that we can access metrics other than Accuracy.
+
+```{r}
+
+control <- trainControl(method = "cv", number = 5, allowParallel = T,
+                       classProbs = T, summaryFunction = twoClassSummary)
+
+```
+
+##Dimension Reduction (PCA):
+
+We do [PCA transformation](https://en.wikipedia.org/wiki/Principal_component_analysis) to generate principal component features, which are uncorrelated (orthogonal) linear combinations of our raw features that capture the highest variance in the (remaining) data: 
+
+
+```{r}
+
+#Data Preparation:
+#remove the target (and other vars?)
+x.train <- df_train %>% dplyr::select(-cid, -datestamp, -id, -target_customer)
+x.test <- df_test %>% dplyr::select(-cid, -datestamp, -id, -target_customer)
+
+x.train <- df_train[,c("purchase_amount","trueBirthyear","trueGender","country","device")]
+x.test <- df_test[,c("purchase_amount","trueBirthyear","trueGender","country","device")]
+
+#PCA on training set (minus target!)
+x.train[] <- lapply(x.train, function(x) as.numeric(as.factor(x)))
+pca_train <- prcomp(x.train, scale = T, center = T)
+#calculate variance
+pca_train$var <- pca_train$sdev^2
+#how much variance explained by each component
+pve <- pca_train$var/sum(pca_train$var)
+#pve   
+#graph of cumulative sum of variance explained by each PC
+plot(cumsum(pve), xlab = "Principal Component", ylab = "Cum. Prop. of Var. Explained")
+
+
+```
+
+Based on the amount of variance we see explained by the subsequent Principal Components, we'll cap how many PCs we use. It appears, though, that the cumulative proportion of variance explained by every additional component is rather linear, meaning that we can't reduce the number of variables significantly without losing variance in our data. Still, we'll cap it at 55 principal components (out of 59 original features) because the last few PCs appear to explain less variation than the first 55. (just for fun)
+
+We do PCA transformation using "preProcess" from the caret package here (for consistency), creating the principal components out of the x variables, then adding by the y variable (churn):
+
+```{r}
+
+#Data Preparation:
+#remove the target 
+#x.train <- churn_train %>% dplyr::select(-customer_id, -is_churn)
+#x.test <- churn_test %>% dplyr::select(-customer_id, -is_churn)
+
+#create a pre-processing transformation object
+preProc <- preProcess(x.train, #don't include target
+                      method = c("pca", "scale", "center"),   
+                      pcaComp = 55)  #how many PCA components to keep (up to "p")
+
+#apply (same) preprocessing to both train and test sets (minus target):
+#Thus, we have our (x) features (all PC's or combinations of previous features)
+train.pca <- predict(preProc, x.train)
+test.pca <- predict(preProc, x.test)
+#add the target variable (y) back:
+train.pca$is_churn <- churn_train$is_churn
+test.pca$is_churn <- churn_test$is_churn
+
+
+```
+
+#Modeling:
+
+
+##Logistic:
+
+
+
+##Logistic Model
+
+First using our raw features.
+
+```{r}
+
+start.time <- Sys.time()  #measure how much time it takes
+
+#register cluster
+cluster <- makeCluster(detectCores() - 1) # convention to leave 1 core for OS
+registerDoParallel(cluster)
+
+#train a logistic model with caret:
+glm_model = caret::train(
+  form = target_customer ~ purchase_amount + trueBirthyear + trueGender + country + device,
+  data = df_train,
+  trControl = trainControl(method = "cv", number = 5, allowParallel = F),
+  method = "glm",   
+  family = "binomial"
+)
+
+#de-register parallel processing cluster:
+stopCluster(cluster)
+registerDoSEQ()     #forces R to return to single-thread processing
+
+
+#measure passed time:
+end.time <- Sys.time()
+end.time - start.time
+
+
+## EVALUATION on test data
+#make predictions, using the generated model, on test data
+glm_prediction <- predict(glm_model, churn_test)
+#create "confusion matrix": Calculates a cross-tabulation of observed and predicted classes with associated statistics.
+glm.cm <- confusionMatrix(glm_prediction, churn_test$is_churn)
+glm.cm
+
+```
+

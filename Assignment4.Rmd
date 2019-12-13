@@ -1,0 +1,479 @@
+---
+title: "7313 Assignment 4: Evaluation"
+output: 
+  pdf_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = T)
+
+
+library(RMySQL)   #MySQL interaction
+library(dplyr)    #data handling
+library(caret)    #classification and regression training
+#library(ggplot2)   #for graphs
+library(magrittr)  #for pipes
+library(parallel)  #parallel processing for model training
+library(doParallel) #ditto
+
+#SQL connection:
+mydb <- dbConnect(MySQL(), dbname = "ToyStorey", host = 'db.cfda.se', 
+                port = 3306, user = "toystorey", password = "toys@sse") 
+```
+
+\newpage
+
+#Summary:
+
+**Business Use Case**: Predict whether a customer will churn (i.e. whether a customer has only made one purchase). 
+
+**Target**: *is_churn*: "1 if customer did NOT return, 0 if customer did return"
+
+**Features**: as defined in "Exploratory Data Analysis" Lab. 
+
+- *home_delivery*: Binary variable (1 if home delivery, 0 if collected in store)
+- *num_items_sold*: The number of items included in the order
+- *sales*: The total purchase amount in SEK
+- *shipping_cost*: How much the customer paid for shipping in SEK
+- *discount*: If a discount was applied to order
+
+Furthermore, **Principal Component Analysis (PCA)** was applied to the features in an attempt to root out unhelpful correlations between the features and find a lower dimensional representation of the data (and hopefully feature selection). However, the PCA applied below led to very limited variable selection: only the very last two principle components were cut, as the share of variation in the data explained by every subsequent PC incorporated was roughly even (as seen in the linear cumulative explained variance plot below); thus it was fruitless to narrow down variables much more than that. (We keep the first 55 principal components, as the last two PCs explain relatively smaller amounts of variance - about a third as much)
+
+
+**Models Evaluated**: 
+
+The following models were fitted with the specification of "is_churn ~." with the above features, both in "raw" format, and after being transformed by PCA. Every model has an identical train control object that does a 5-fold cross validation and reports other metrics. The models we trained (using ROC) are:
+
+- Logistic (without PCA)
+- LDA (with and without PCA)
+- QDA (with and without PCA)
+- Random Forest (with and without PCA)
+
+We select the **Random Forest** model based on its accuracy, ROC, and especially Sensitivity.
+
+![Model Comparison](metrics.png)
+
+We prioritize Sensitivity (or True Positive Rate, TPR), as we want to "capture" as many potential churners (*is_churn* = 1) as possible, and perhaps are not worried about False Positives at this point (unless we were to enact a churner-retainer policy that is expensive per predicted churner, but as we see in the Estimated Value Impact section, we'll assume that our churner-targeting policy is free to enact, for now. Therefore false positive churners are infinitely "cheap").
+
+
+**Final Model** 
+
+Based on its having the best accuracy, as well as the best ROC (balancing true positives and negatives) in our model evaluation, we choose the **Random Forest** model, using PCA-treated features.
+
+**Estimated value impact**
+
+Finally, we can evaluate the impact of our model, making two (rather unrealistic) simplifying assumptions (that can be adapted later...):
+
+- The cost of our efforts is 0 SEK (reaching out to churners, bidding them to return to the store, etc)
+- Our efforts are 100% successful
+
+As we can see in the confusion matrix for the Random Forest model (in Appendix), when our model predicts "churn", it is correct ~70% of the time (the *Positive Pred Value* value, or Correct # predicted churn / Total predicted churn). So out of 1000 new customers that are predicted as "churn", ~700 can be expected to actually churn.
+
+From the database we can calculate the sum of sales and the average sales per customer (of ALL sales, not just the first stale), grouped by those customers that churn vs those that are loyal.
+
+
+```{sql connection=mydb, echo = F}
+
+SELECT is_churn, SUM(sales) AS TotalSales, AVG(sales) AS AvgSales, COUNT(*) AS Freq
+FROM 
+(SELECT Receipt.customer_id, 
+    t.is_churn,
+    SUM(IFNULL(Product.price, 0)) AS sales,
+    COUNT(ReceiptProduct.receipt_id) AS num_sold_items
+FROM Receipt
+LEFT JOIN ReceiptProduct 
+	ON (Receipt.receipt_id = ReceiptProduct.receipt_id)
+LEFT JOIN Product
+	ON (ReceiptProduct.product_id = Product.product_id)
+LEFT JOIN (SELECT customer_id, IF(COUNT(*) = 1, 1, 0) AS is_churn FROM Receipt GROUP BY customer_id) t 
+    ON (Receipt.customer_id = t.customer_id)
+GROUP BY customer_id) innerquery
+GROUP BY is_churn;
+
+```
+
+Therefore, for every customer we can retain, we expect on average to make **212 SEK** more (the average loyal customer has average sales of 255 SEK while the average churner has average sales of 43 SEK). Therefore, if retention costs are below 212 SEK per customer retained, we can expect a positive net result. For the following value impact, though, we'll assume it costs nothing to retain a customer, and retaining an identified churner is 100% certain (This is NOT realistic, adjust later):
+
+One very basic measure of total expected value, assuming we reach out to EVERYONE we suspect as a churner, then, could be calculated by taking the number of correctly predicted churners (~50,000) and multiply by the difference in average sales (between churners and loyal customers), or 212 SEK. We get ~50,000\*212 = 10.6 million SEK.
+
+A more marginal (and thus applicable) estimate of value impact: For every 1000 predicted churners that we approach (and successfuly retain at no cost), we can assume 700 are actually would-be churners, which, if we retain, will net us 700*212 SEK, or 148,400 SEK.
+
+To be more realistic, then, we can multiply our estimate by a probability of success (we retain X% of customers we approach, e.g.) and also subtracting out marginal costs for the effort of reaching each predicted churner.
+
+\newpage
+
+
+#Data Preparation: 
+
+##Load datasets:
+
+
+```{r dataimport, message = F, warning = F}
+
+setwd("C:/Users/nickp/Documents/7313DataAnalysis")
+
+#Load churn dataset directly from csv:
+df = read.csv("churn_combo.csv") %>% dplyr::select(-X)
+
+#make sure target variable is factor (for classification models; for regression models, not needed):
+df$is_churn = as.factor(ifelse(df$is_churn==1, "churn", "loyal"))
+
+```
+
+##Split into training/test:
+
+Split data into training and test set:
+
+```{r}
+
+set.seed(7313)
+#partition the data evenly along the dependent variable: 70% will be training, 30% testing
+training.indices <- createDataPartition(df$is_churn, p = 0.7, list = F)
+#training data set
+churn_train <- df[training.indices,]
+#testing data set
+churn_test <- df[-training.indices,]
+
+```
+
+
+##Create a "train control" object
+
+This train control object will apply to all models below. We use 5-fold cross validation. We choose "twoClassSummary" so that we can access metrics other than Accuracy.
+
+```{r}
+
+control <- trainControl(method = "cv", number = 5, allowParallel = T,
+                       classProbs = T, summaryFunction = twoClassSummary)
+
+```
+
+##Dimension Reduction (PCA):
+
+We do [PCA transformation](https://en.wikipedia.org/wiki/Principal_component_analysis) to generate principal component features, which are uncorrelated (orthogonal) linear combinations of our raw features that capture the highest variance in the (remaining) data: 
+
+
+```{r}
+
+#Data Preparation:
+#remove the target (and other vars?)
+x.train <- churn_train %>% dplyr::select(-customer_id, -is_churn)
+x.test <- churn_test %>% dplyr::select(-customer_id, -is_churn)
+
+#PCA on training set (minus target!)
+pca_train <- prcomp(x.train, scale = T, center = T)
+#calculate variance
+pca_train$var <- pca_train$sdev^2
+#how much variance explained by each component
+pve <- pca_train$var/sum(pca_train$var)
+#pve   
+#graph of cumulative sum of variance explained by each PC
+plot(cumsum(pve), xlab = "Principal Component", ylab = "Cum. Prop. of Var. Explained")
+
+
+```
+
+Based on the amount of variance we see explained by the subsequent Principal Components, we'll cap how many PCs we use. It appears, though, that the cumulative proportion of variance explained by every additional component is rather linear, meaning that we can't reduce the number of variables significantly without losing variance in our data. Still, we'll cap it at 55 principal components (out of 59 original features) because the last few PCs appear to explain less variation than the first 55. (just for fun)
+
+We do PCA transformation using "preProcess" from the caret package here (for consistency), creating the principal components out of the x variables, then adding by the y variable (churn):
+
+```{r}
+
+#Data Preparation:
+#remove the target 
+#x.train <- churn_train %>% dplyr::select(-customer_id, -is_churn)
+#x.test <- churn_test %>% dplyr::select(-customer_id, -is_churn)
+
+#create a pre-processing transformation object
+preProc <- preProcess(x.train, #don't include target
+                      method = c("pca", "scale", "center"),   
+                      pcaComp = 55)  #how many PCA components to keep (up to "p")
+
+#apply (same) preprocessing to both train and test sets (minus target):
+#Thus, we have our (x) features (all PC's or combinations of previous features)
+train.pca <- predict(preProc, x.train)
+test.pca <- predict(preProc, x.test)
+#add the target variable (y) back:
+train.pca$is_churn <- churn_train$is_churn
+test.pca$is_churn <- churn_test$is_churn
+
+
+```
+
+
+
+
+#Models (all features):
+
+See a list of models available in R package for classification and regression training *caret* (and their tuning parameters) [here](https://topepo.github.io/caret/available-models.html):
+
+Various methods of estimating model accuracy with caret [here](https://machinelearningmastery.com/how-to-estimate-model-accuracy-in-r-using-the-caret-package/). (Note in the following models we just use the same train control objects).
+
+Tuning the "trainControl" object [here](https://rdrr.io/cran/caret/man/trainControl.html).
+
+
+##Logistic Model
+
+First using our raw features.
+
+```{r}
+
+start.time <- Sys.time()  #measure how much time it takes
+
+#register cluster
+cluster <- makeCluster(detectCores() - 1) # convention to leave 1 core for OS
+registerDoParallel(cluster)
+
+#train a logistic model with caret:
+glm_model = caret::train(
+  form = is_churn ~.,
+  data = churn_train,
+  trControl = control,
+  method = "glm",   
+  family = "binomial"
+)
+
+#de-register parallel processing cluster:
+stopCluster(cluster)
+registerDoSEQ()     #forces R to return to single-thread processing
+
+
+#measure passed time:
+end.time <- Sys.time()
+end.time - start.time
+
+
+## EVALUATION on test data
+#make predictions, using the generated model, on test data
+glm_prediction <- predict(glm_model, churn_test)
+#create "confusion matrix": Calculates a cross-tabulation of observed and predicted classes with associated statistics.
+glm.cm <- confusionMatrix(glm_prediction, churn_test$is_churn)
+glm.cm
+
+```
+
+Then using our PCA-transformed feature variables:
+
+```{r}
+
+#train a logistic model with caret:
+glm.pca_model = caret::train(
+  form = is_churn ~.,
+  data = train.pca,
+  trControl = control,
+  method = "glm",   #linear logistic model (Change this later)
+  family = "binomial",
+  metric = "ROC"
+)
+
+## EVALUATION on test data
+#make predictions, using the generated model, on test data
+glm.pca_prediction = predict(glm.pca_model, test.pca)
+#create "confusion matrix": Calculates a cross-tabulation of observed and predicted classes with associated statistics.
+glm.pca.cm <- confusionMatrix(glm.pca_prediction, test.pca$is_churn)
+glm.pca.cm
+
+```
+
+
+##LDA model:
+
+
+[Linear discriminant analysis](https://en.wikipedia.org/wiki/Linear_discriminant_analysis): 
+
+```{r}
+
+#train a LDA model with caret:
+LDA_model = caret::train(
+  is_churn ~.,
+  data = churn_train,
+  trControl = control,
+  method = "lda"
+)
+
+
+#Predicted classes:
+lda_prediction <- predict(LDA_model, churn_test)
+
+#confusion matrix:
+lda.cm <- confusionMatrix(lda_prediction, churn_test$is_churn)
+lda.cm
+
+
+
+```
+
+
+Then using our PCA-transformed feature variables:
+
+```{r}
+
+
+#train a LDA model with caret:
+LDA.pca_model = caret::train(
+  is_churn ~.,
+  data = train.pca,
+  trControl = control,
+  method = "lda"
+)
+
+
+#Predicted classes:
+lda.pca_prediction <- predict(LDA.pca_model, test.pca)
+
+#confusion matrix:
+lda.pca.cm <- confusionMatrix(lda.pca_prediction, test.pca$is_churn)
+lda.pca.cm
+
+```
+
+
+##QDA model:
+
+```{r}
+
+#train a QDA model:
+QDA_model = caret::train(
+  is_churn ~. ,
+  data = churn_train,
+  trControl = control,
+  method = "qda"   
+)
+
+#Predicted classes:
+qda_prediction <- predict(QDA_model, churn_test)
+
+#confusion matrix:
+qda.cm <- confusionMatrix(qda_prediction, churn_test$is_churn)
+qda.cm
+
+```
+
+
+Then using our PCA-transformed feature variables:
+
+```{r}
+
+#train a QDA model:
+QDA.pca_model = caret::train(
+  is_churn ~. ,
+  data = train.pca,
+  trControl = control,
+  method = "qda"   
+)
+
+#Predicted classes:
+qda.pca_prediction <- predict(QDA.pca_model, test.pca)
+
+#confusion matrix:
+qda.pca.cm <- confusionMatrix(qda.pca_prediction, test.pca$is_churn)
+qda.pca.cm
+
+```
+#Random Forest:
+
+Finally, we train a random forest (only with PCA features):
+
+```{r}
+set.seed(7313)
+### Random forests, with sqrt(p) features per tree, 10 trees and principal components ##
+rf.fit.pca <- caret::train(is_churn~., 
+                      data=train.pca, 
+                      method='rf', 
+                      ntree = 10,
+                      trControl= control )
+
+#calculate training accuracy
+#pred = predict(rf.fit.pca, train.pca)
+#confusionMatrix(pred, train.pca$is_churn)
+#accuracy is 0.9588
+#calculate test accuracy
+rf.pca.cm <- confusionMatrix(predict(rf.fit.pca, test.pca), test.pca$is_churn)
+rf.pca.cm
+#accuracy is ~75% on test data 
+
+```
+
+
+
+
+#Comparison of Models
+
+Using the models, we can see that QDA (both using all variables and using PCA variables) generally scores high on sensitivity (the true positive rate, TPR), while Logistic and LDA models score high on Specificity (True Negative Rate, TNR). However, Random forest, seems to do best on both metrics, and therefore does best with ROC. Furthermore, we can see RF does best for accuracy as well. Thus, we choose our **Random Forest** model.
+
+```{r}
+
+
+# Evaluate logit, lda and qda models with full features / with 
+results = resamples(list(
+  logit = glm_model, logitPCA = glm.pca_model, 
+  lda = LDA_model, ldaPCA = LDA.pca_model, 
+  qda = QDA_model, qdaPCA = QDA.pca_model,
+  RF = rf.fit.pca))
+#Plot 
+dotplot(results, main = "Model Metrics")
+#plot Accuracies
+dotplot(c(qda = qda.cm$overall[1],qdaPCA =qda.pca.cm$overall[1],
+          lda = lda.cm$overall[1],ldaPCA = lda.pca.cm$overall[1],
+          logit = glm.cm$overall[1], logitPCA = glm.pca.cm$overall[1],
+          RF = rf.pca.cm$overall[1]), xlab = "Accuracy", main = "Accuracies by Model")
+
+
+
+```
+
+
+Thus, we choose the **Random Forest** (using PCA with *some* dimension reduction) as our best model.
+
+#Estimated value impact
+
+Finally, we can evaluate the impact of our model, making a few (unrealistic) simplifying assumptions:
+
+- The cost of our efforts is 0 SEK (reaching out to churners, bidding them to return to the store, etc)
+- Our efforts are 100% successful
+
+We can see the results of our chosen model (Random Forest), when applied to test data:
+
+```{r, echo = F, warning = F, message = F}
+rf.pca.cm
+
+mydb <- dbConnect(MySQL(), dbname = "ToyStorey", host = 'db.cfda.se', 
+                port = 3306, user = "toystorey", password = "toys@sse") 
+```
+
+As we can see, when our model predicts "churn", it is correct ~70% of the time (the *Positive Pred Value*, or Correct # churn / Total pred churn). So out of 1000 new customers that are predicted as "churn", ~700 can be expected to actually churn.
+
+From the database we can calculate the sum of sales and the average sales per customer (of ALL sales, not just the first stale), grouped by those customers that churn vs those that are loyal.
+
+
+```{sql connection=mydb}
+
+SELECT is_churn, SUM(sales) AS SumSales, AVG(sales) AS AvgSales, COUNT(*) AS Freq
+FROM 
+(SELECT Receipt.customer_id, 
+    t.is_churn,
+    SUM(IFNULL(Product.price, 0)) AS sales,
+    COUNT(ReceiptProduct.receipt_id) AS num_sold_items
+FROM Receipt
+LEFT JOIN ReceiptProduct 
+	ON (Receipt.receipt_id = ReceiptProduct.receipt_id)
+LEFT JOIN Product
+	ON (ReceiptProduct.product_id = Product.product_id)
+LEFT JOIN (SELECT customer_id, IF(COUNT(*) = 1, 1, 0) AS is_churn FROM Receipt GROUP BY customer_id) t 
+    ON (Receipt.customer_id = t.customer_id)
+GROUP BY customer_id) innerquery
+GROUP BY is_churn;
+
+```
+
+Therefore, for every customer we can retain, we expect on average to make **212 SEK** more (the average loyal customer has average sales of 255 SEK while the average churner has average sales of 43 SEK). Therefore, if retention costs are below 212 SEK per customer retained, we can expect a positive net result. For the following value impact, though, **we'll assume it costs nothing to retain a customer, and retaining an identified churner is 100% certain** (not realistic, adjust later):
+
+One very basic measure of total expected value, assuming we reach out to EVERYONE we suspect as a churner, then, could be calculated by taking the number of correctly predicted churners (~50,000) and multiply by the difference in average sales (between churners and loyal customers), or 212 SEK. We get ~50,000\*212 = 10.6 million SEK.
+
+A more marginal (and thus applicable) estimate of value impact: For every 1000 predicted churners that we approach (and successfuly retain at no cost), we can assume 700 are actually would-be churners, which, if we retain, will net us 700*212 SEK, or 148,400 SEK.
+
+To be more realistic, then, we can multiply our estimate by a probability of success (we retain X% of customers we approach, e.g.) and also subtracting out costs for the effort of reaching predicted churners. To be done later...
+
+
+

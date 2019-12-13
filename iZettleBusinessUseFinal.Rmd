@@ -32,8 +32,6 @@ sql_con = dbConnect(MySQL(), dbname = "IZettle", host = "db.cfda.se",
 #fetch entire Order table
 query <- 'SELECT * FROM IZettleOrder;'
 data <- fetch(dbSendQuery(sql_con,query), n=-1)
-#df <- data #make copy
-#data <- df #restore
 
 # Load Customer aggregates (like "Group by") - for all 673813 customers!
 customers <- data %>% 
@@ -46,30 +44,30 @@ customers <- data %>%
             #At least one mobile purchase:
             nonDesktopPurchases = sum(target == "0", na.rm = T))
 
-#Clean data: 
+#Clean data and join customer aggregates to raw table: 
 #fix genders (1836 have multiple, AKA "none" plus the real gender):
 customers$trueGender <- case_when(
   customers$Male > 0 ~ "male",
   customers$Female > 0 ~ "female",
-  TRUE ~ "none"
+  TRUE ~ "none"   #else it stays "none"
 )
 
-#fix Birthyears (204 have multiple)
+#fix Birthyears (204 have multiple -- "" plus their true birthyear)
 customers$trueBirthyear <- stringr::str_extract(customers$Birth, "[[:digit:]]+")
 
 #Join Customer characteristics onto main dataset:
 data <- left_join(data, customers[,c("cid","trueBirthyear", "trueGender", "NumberPurchases","TotalSales","AvgSales","nonDesktopPurchases")], by = "cid")
 
-#We can see that top buyers still do not have genders or birthyears...
-#View(arrange(customers, desc(TotalSales)))
+#We can see that top buyers still do not have genders or birthyears... these are likely B2B, so we will try to exclude this in our "target"
+#View(arrange(customers, desc(TotalSales)))    #can "eyeball" a rough threshold for total human/B2B spending ~15000(.)00 SEK
 
-
-#Create target: customers with at least one mobile purchase (mobile users), have multiple purchases (not churn), and total purchases below some sum (not B2B)
+#Create target: variable customers with at least one mobile purchase (mobile users), have multiple purchases (not churn), and total purchases below some sum (not B2B)
 mult_customers <- filter(customers, NumberPurchases > 1) %>% select(cid)   #customer IDs who have bought multiple
+#our target: "target_customer": 3 conditions! Mobile user + not-churn + does not spend "too much" (indicative of B2B)
 data$target_customer <- ifelse(data$nonDesktopPurchases > 0 & data$cid %in% mult_customers$cid & data$TotalSales < 1500000, 1, 0)
 
 
-#filter out missing targets
+#filter out missing targets and B2B customers (train on human customers)  ***TODO - keep this?
 data2 <- filter(data, !is.na(target) & !is.na(trueBirthyear) & trueGender!= "none") 
 
 #keep only first obsevation 
@@ -79,17 +77,16 @@ df_final <- data2 %>%
   arrange(datestamp) %>%
   slice(1L) #keep first row in grouped,arranged dataset
 
-### Create Target/ Features
+
+### Create other Features
+
 #make sure target variable is factor (for classification models; for regression models, not needed):
 df_final$target_customer %<>% as.factor()
 levels(df_final$target_customer) <- c("nontarget","target")
 
-
 #Fix NAs (check NAS)
 #sapply(df_final, function(x) sum(is.na(x)))
-df_final$trueBirthyear %<>% as.numeric()
 #df_final[is.na(df_final)] <- 0
-
 
 #change to proper variables:
 factorcols <- c("id","cid","currency","birthyear","gender","merchant_id","country","device","target","trueGender","trueBirthyear")
@@ -103,6 +100,7 @@ df_final$month <- lubridate::month(df_final$datestamp)
 
 df_final$sweden <- as.factor(ifelse(df_final$country == "se", 1, 0))
 df_final$norway <- as.factor(ifelse(df_final$country == "no", 1, 0))
+df_final$trueBirthyear %<>% as.numeric()
 
 
 #remove some vars (TODO) just to be certain...: (model training wassn't working!!)
@@ -145,30 +143,31 @@ lda.model <- caret::train(
   data = df_train,
   trControl = trainControl(method = "cv", number = 5, classProbs = T, summaryFunction = twoClassSummary),
   method = "lda"
-)   #81% accuracy, low specificity
+)   #83% accuracy, 98% specificity, 33% sensitivity
 confusionMatrix(predict(lda.model, df_train), df_train$target_customer, positive = "target")
 confusionMatrix(predict(lda.model, df_test), df_test$target_customer, positive = "target")
 
 #train a QDA model with caret:
+#NOTE: "AvgSales","sweden", and "norway" were removed for collinearity within group nontarget. we can quietly ignore this? lol
 qda.model <- caret::train(
-  form = target_customer ~ purchase_amount + merchant_id + trueBirthyear + trueGender + AvgSales + month + sweden + norway + TotalSales +NumberPurchases ,
+  form = target_customer ~ purchase_amount + merchant_id+ trueBirthyear + month + trueGender + TotalSales +NumberPurchases ,
   data = df_train,
   trControl = trainControl(method = "cv", number = 5),
   method = "qda"
-)   #75% accuracy, 20%specificity, not better than NIR though
+)   #86% accuracy, 94% specificity, 58% sensitivity
 confusionMatrix(predict(qda.model, df_train), df_train$target_customer, positive = "target")
 confusionMatrix(predict(qda.model, df_test), df_test$target_customer, positive = "target")
 
 
 #train a Random Forest model with caret:
-smallIndex <- createDataPartition(df_train$target_customer, p = 0.01, list = F)
+smallIndex <- createDataPartition(df_train$target_customer, p = 0.1, list = F)   #run RF on a SMALLER 10% subset (for speed...)
 smalltrain <- df_train[smallIndex,]
 rf.model = caret::train(
   form = target_customer ~  purchase_amount + merchant_id + trueBirthyear + trueGender + AvgSales + month + sweden + norway + TotalSales +NumberPurchases ,
   data = smalltrain,
   trControl = trainControl(method = "cv", number = 5),
   method = "rf"
-)  #90% accuracy, 77% specificity, better than NIR
+)  #91% accuracy, 90% specificity, 95% sensitivity
 rf.cm.train <- confusionMatrix(predict(rf.model, df_train), df_train$target_customer, positive = "target")
 rf.cm.test <- confusionMatrix(predict(rf.model, df_test), df_test$target_customer, positive = "target")
 
@@ -186,7 +185,7 @@ parametersGrid <-  expand.grid(eta = 0.1,
                             )
 
 modelxgboost <- caret::train(
-  form = target_customer ~  purchase_amount + merchant_id + trueBirthyear + trueGender + AvgSales + month + sweden + norway + NumSales,
+  form = target_customer ~  purchase_amount + merchant_id + trueBirthyear + trueGender + AvgSales + month + sweden + norway + TotalSales +NumberPurchases,
   data = smalltrain,
   trControl = trainControl(method = "cv", number = 5, savePredictions = T, classProbs = T),
   method = "xgbTree",
@@ -202,12 +201,50 @@ z <- varimp$importance
 z$percent <- as.numeric(z$Overall / sum(z$Overall))
 
 
-
-##Correlation matrix:
-#fit <- aov(target_customer ~., data=correlated)
-
 ```
 
+```{r examplePlots}
+#(basically copy/pasted from my Assignment 5 -- not useful as-is,but  feel free to modify for interesting plots...)
+
+##VISUALIZATIONS:
+
+#some Variables to work with:   
+colnames(df_final)
+
+##BARPLOTS  
+#illustrating the problem with the churn variable: by month 
+ggplot(df_final, 
+       aes(x = month, y = ..count.., 
+           fill = target_customer)) + 
+  geom_bar(position = "stack")
+
+#loyalty in particular merchants:
+ggplot(df_final, 
+       aes(x = merchant_id, y = ..count.., 
+           fill = target_customer)) + 
+  geom_bar(position = "stack") + coord_flip()
+
+ggplot(df_final, 
+       aes(x = merchant_id, y = TotalSales, 
+           fill = target_customer)) + 
+  geom_bar(position = "stack", stat = "identity") + coord_flip()
+
+##SCATTERPLOTS 
+## number of sold items by profit, colored by target
+ggplot(df_final, 
+       aes(x = NumberPurchases, y = TotalSales, 
+           color = target_customer)) + geom_point()
+
+##DENSITYPLOTS
+cdplot(target_customer ~ month, data=df_final)
+ggplot(df_final, aes(x= TotalSales, color = target_customer)) +  xlim(0,500000)+
+  geom_density()
+
+##BOXPLOTS
+ggplot(df_final, aes(x=target_customer, y=TotalSales)) + 
+  geom_boxplot()  + coord_flip() + ylim(0,500000)
+
+```
 
 
 

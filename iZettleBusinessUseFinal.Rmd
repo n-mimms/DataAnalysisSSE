@@ -22,6 +22,188 @@ mydb <- dbConnect(MySQL(), dbname = "ToyStorey", host = 'db.cfda.se',
                 port = 3306, user = "toystorey", password = "toys@sse") 
 ```
 
+```{r fullCOde, echo = F, eval = T, warning = F, message = F}
+
+### LOAD DATA:
+
+#establish MySQL connection:
+sql_con = dbConnect(MySQL(), dbname = "IZettle", host = "db.cfda.se", 
+                port = 3306, user = "toystorey", password = "toys@sse") 
+#fetch entire Order table
+query <- 'SELECT * FROM IZettleOrder;'
+data <- fetch(dbSendQuery(sql_con,query), n=-1)
+#df <- data #make copy
+#data <- df #restore
+
+# Load Customer aggregates (like "Group by") - for all 673813 customers!
+customers <- data %>% 
+  group_by(cid) %>%  
+  summarise(NumberPurchases = n(), TotalSales = sum(as.numeric(purchase_amount)), AvgSales = mean(as.numeric(purchase_amount)),
+            #Genders
+            nGender = n_distinct(gender), Male = sum(gender == "male"), Female = sum(gender == "female"),
+            #Birthyears - paste together the different values for one customer
+            nBirthyear = n_distinct(birthyear), Birth = toString(unique(birthyear)))
+
+#Clean data: 
+#fix genders (1836 have multiple, AKA "none" plus the real gender):
+customers$trueGender <- case_when(
+  customers$Male > 0 ~ "male",
+  customers$Female > 0 ~ "female",
+  TRUE ~ "none"
+)
+
+#fix Birthyears (204 have multiple)
+customers$trueBirthyear <- stringr::str_extract(customers$Birth, "[[:digit:]]+")
+
+#Join Customer characteristics onto main dataset:
+data <- left_join(data, customers[,c("cid","trueBirthyear", "trueGender", "NumberPurchases","TotalSales","AvgSales")], by = "cid")
+
+#We can see that top buyers still do not have genders or birthyears...
+#View(arrange(customers, desc(TotalSales)))
+
+
+#Create target: customers with multiple purchases
+mult_customers <- filter(customers, NumberPurchases > 1) %>% select(cid)   #customer IDs who have bought multiple
+data$target_customer <- ifelse(data$target ==0 & data$cid %in% mult_customers$cid & data$TotalSales < 1459100, 1, 0)
+
+
+#DON'T DO THIS?
+#filter out missing targets
+data2 <- filter(data, !is.na(target)) 
+
+#keep only first obsevation 
+data2$datestamp %<>% as.Date()  #turn into date
+df_final <- data2 %>%
+  group_by(cid) %>%
+  arrange(datestamp) %>%
+  slice(1L) #keep first row in grouped,arranged dataset
+
+### Create Target/ Features
+
+#make sure target variable is factor (for classification models; for regression models, not needed):
+df_final$target_customer %<>% as.factor()
+levels(df_final$target_customer) <- c("nontarget","target")
+
+
+#Fix NAs (check NAS)
+#sapply(df_final, function(x) sum(is.na(x)))
+df_final$trueBirthyear %<>% as.numeric()
+df_final[is.na(df_final)] <- 0
+
+
+#change to proper variables:
+factorcols <- c("id","cid","currency","birthyear","gender","merchant_id","country","device","target","trueGender","trueBirthyear")
+df_final[factorcols] <- lapply(df_final[factorcols], factor) 
+df_final$purchase_amount %<>% as.numeric()
+df_final$NumberPurchases %<>% as.numeric()
+df_final$TotalSales %<>% as.numeric()
+df_final$AvgSales %<>% as.numeric()
+df_final$month <- lubridate::month(df_final$datestamp)
+df_final$trueBirthyear %<>% as.numeric() %>% as.factor()
+
+df_final$sweden <- as.factor(ifelse(df_final$country == "se", 1, 0))
+df_final$norway <- as.factor(ifelse(df_final$country == "no", 1, 0))
+
+
+#remove some vars (TODO) just to be certain...: (model training wassn't working!!)
+df_final$datestamp <- NULL
+df_final$currency <- NULL
+df_final$device <- NULL
+df_final$target <- NULL
+df_final$gender <- NULL
+df_final$birthyear <- NULL
+df_final$country <- NULL
+
+#Write CSVs for IBM machine learning:
+#write.csv(df_final, "IBMizettleFULL.csv")
+smallSampleIndex <- createDataPartition(df_final$target_customer, p = 0.05, list = F)
+smallSample <- df_final[smallSampleIndex,]
+#write.csv(smallSample, "IBMizettleSMALL.csv")
+
+
+### Split into Train/Test
+
+#partition the data evenly along the dependent variable: 70% will be training, 30% testing
+training.indices <- createDataPartition(df_final$target_customer, p = 0.5, list = F)
+df_final2 <- df_final[training.indices,]
+#df_final2 <- df_final
+
+training.indices <- createDataPartition(df_final2$target_customer, p = 0.7, list = F)
+#training data set
+df_train <- df_final2[training.indices,]
+#testing data set
+df_test <- df_final2[-training.indices,]
+
+
+### Different Models:
+
+
+#train a LDA model with caret:
+lda.model = caret::train(
+  form = target_customer ~. -cid -id,
+  data = df_train,
+  trControl = trainControl(method = "cv", number = 5, classProbs = T, summaryFunction = twoClassSummary),
+  method = "lda"
+)   #81% accuracy, low specificity
+confusionMatrix(predict(lda.model, df_train), df_train$target_customer, positive = "target")
+confusionMatrix(predict(lda.model, df_test), df_test$target_customer, positive = "target")
+
+#train a QDA model with caret:
+qda.model = caret::train(
+  form = target_customer ~ purchase_amount  + trueBirthyear + trueGender  + merchant_id + month,
+  data = df_train,
+  trControl = trainControl(method = "cv", number = 5),
+  method = "qda"
+)   #75% accuracy, 20%specificity, not better than NIR though
+confusionMatrix(predict(qda.model, df_train), df_train$target_customer, positive = "target")
+confusionMatrix(predict(qda.model, df_test), df_test$target_customer, positive = "target")
+
+
+#train a Random Forest model with caret:
+smallIndex <- createDataPartition(df_train$target_customer, p = 0.01, list = F)
+smalltrain <- df_train[smallIndex,]
+rf.model.noNum = caret::train(
+  form = target_customer ~  purchase_amount + merchant_id + trueBirthyear + trueGender + AvgSales + month + sweden + norway  ,
+  data = smalltrain,
+  trControl = trainControl(method = "cv", number = 5),
+  method = "rf"
+)  #90% accuracy, 77% specificity, better than NIR
+#rf.cm.train <- confusionMatrix(predict(rf.model, df_train), df_train$target_customer, positive = "target")
+#rf.cm.test <- confusionMatrix(predict(rf.model, df_test), df_test$target_customer, positive = "target")
+
+varimp <- varImp(rf.model.noNum)
+z <- varimp$importance
+z$percent <- as.numeric(z$Overall / sum(z$Overall))
+
+
+##XGBoosted Tree : 
+#https://analyticsdataexploration.com/xgboost-model-tuning-in-crossvalidation-using-caret-in-r/
+
+parametersGrid <-  expand.grid(eta = 0.1, 
+                            colsample_bytree=c(0.5,0.7),
+                            max_depth=c(3,6),
+                            nrounds=100,
+                            subsample =  c(0.5, 1),
+                            gamma=1,
+                            min_child_weight=2
+                            )
+
+modelxgboost <- caret::train(
+  form = target_customer ~  purchase_amount + merchant_id + trueBirthyear + trueGender + AvgSales + month + sweden + norway + NumSales,
+  data = smalltrain,
+  trControl = trainControl(method = "cv", number = 5, savePredictions = T, classProbs = T),
+  method = "xgbTree",
+  tuneGrid = parametersGrid
+) 
+
+xgb.cm.train <- confusionMatrix(predict(modelxgboost, df_train), df_train$target_customer, positive = "target")
+xgb.cm.test <- confusionMatrix(predict(modelxgboost, df_test), df_test$target_customer, positive = "target")
+
+```
+
+
+
+
 \newpage
 
 #Summary:
@@ -41,65 +223,6 @@ mydb <- dbConnect(MySQL(), dbname = "ToyStorey", host = 'db.cfda.se',
 Furthermore, **Principal Component Analysis (PCA)** was applied to the features in an attempt to root out unhelpful correlations between the features and find a lower dimensional representation of the data (and hopefully feature selection). However, the PCA applied below led to very limited variable selection: only the very last two principle components were cut, as the share of variation in the data explained by every subsequent PC incorporated was roughly even (as seen in the linear cumulative explained variance plot below); thus it was fruitless to narrow down variables much more than that. (We keep the first 55 principal components, as the last two PCs explain relatively smaller amounts of variance - about a third as much)
 
 
-**Models Evaluated**: 
-
-The following models were fitted with the specification of "is_churn ~." with the above features, both in "raw" format, and after being transformed by PCA. Every model has an identical train control object that does a 5-fold cross validation and reports other metrics. The models we trained (using ROC) are:
-
-- Logistic (without PCA)
-- LDA (with and without PCA)
-- QDA (with and without PCA)
-- Random Forest (with and without PCA)
-
-We select the **Random Forest** model based on its accuracy, ROC, and especially Sensitivity.
-
-![Model Comparison](metrics.png)
-
-We prioritize Sensitivity (or True Positive Rate, TPR), as we want to "capture" as many potential churners (*is_churn* = 1) as possible, and perhaps are not worried about False Positives at this point (unless we were to enact a churner-retainer policy that is expensive per predicted churner, but as we see in the Estimated Value Impact section, we'll assume that our churner-targeting policy is free to enact, for now. Therefore false positive churners are infinitely "cheap").
-
-
-**Final Model** 
-
-Based on its having the best accuracy, as well as the best ROC (balancing true positives and negatives) in our model evaluation, we choose the **Random Forest** model, using PCA-treated features.
-
-**Estimated value impact**
-
-Finally, we can evaluate the impact of our model, making two (rather unrealistic) simplifying assumptions (that can be adapted later...):
-
-- The cost of our efforts is 0 SEK (reaching out to churners, bidding them to return to the store, etc)
-- Our efforts are 100% successful
-
-As we can see in the confusion matrix for the Random Forest model (in Appendix), when our model predicts "churn", it is correct ~70% of the time (the *Positive Pred Value* value, or Correct # predicted churn / Total predicted churn). So out of 1000 new customers that are predicted as "churn", ~700 can be expected to actually churn.
-
-From the database we can calculate the sum of sales and the average sales per customer (of ALL sales, not just the first stale), grouped by those customers that churn vs those that are loyal.
-
-
-```{sql connection=mydb, echo = F}
-
-SELECT is_churn, SUM(sales) AS TotalSales, AVG(sales) AS AvgSales, COUNT(*) AS Freq
-FROM 
-(SELECT Receipt.customer_id, 
-    t.is_churn,
-    SUM(IFNULL(Product.price, 0)) AS sales,
-    COUNT(ReceiptProduct.receipt_id) AS num_sold_items
-FROM Receipt
-LEFT JOIN ReceiptProduct 
-	ON (Receipt.receipt_id = ReceiptProduct.receipt_id)
-LEFT JOIN Product
-	ON (ReceiptProduct.product_id = Product.product_id)
-LEFT JOIN (SELECT customer_id, IF(COUNT(*) = 1, 1, 0) AS is_churn FROM Receipt GROUP BY customer_id) t 
-    ON (Receipt.customer_id = t.customer_id)
-GROUP BY customer_id) innerquery
-GROUP BY is_churn;
-
-```
-
-Therefore, for every customer we can retain, we expect on average to make **212 SEK** more (the average loyal customer has average sales of 255 SEK while the average churner has average sales of 43 SEK). Therefore, if retention costs are below 212 SEK per customer retained, we can expect a positive net result. For the following value impact, though, we'll assume it costs nothing to retain a customer, and retaining an identified churner is 100% certain (This is NOT realistic, adjust later):
-
-One very basic measure of total expected value, assuming we reach out to EVERYONE we suspect as a churner, then, could be calculated by taking the number of correctly predicted churners (~50,000) and multiply by the difference in average sales (between churners and loyal customers), or 212 SEK. We get ~50,000\*212 = 10.6 million SEK.
-
-A more marginal (and thus applicable) estimate of value impact: For every 1000 predicted churners that we approach (and successfuly retain at no cost), we can assume 700 are actually would-be churners, which, if we retain, will net us 700*212 SEK, or 148,400 SEK.
-
-To be more realistic, then, we can multiply our estimate by a probability of success (we retain X% of customers we approach, e.g.) and also subtracting out marginal costs for the effort of reaching each predicted churner.
 
 \newpage
 
@@ -107,23 +230,6 @@ To be more realistic, then, we can multiply our estimate by a probability of suc
 #Data Preparation: 
 
 ##Load datasets:
-
-
-```{r dataimport, message = F, warning = F}
-
-setwd("C:/Users/nickp/Documents/7313DataAnalysis")
-
-#Load churn dataset directly from csv:
-df = read.csv("churn_combo.csv") %>% dplyr::select(-X)
-
-#make sure target variable is factor (for classification models; for regression models, not needed):
-df$is_churn = as.factor(ifelse(df$is_churn==1, "churn", "loyal"))
-
-```
-
-##Split into training/test:
-
-Split data into training and test set:
 
 ```{r}
 
@@ -215,214 +321,17 @@ Tuning the "trainControl" object [here](https://rdrr.io/cran/caret/man/trainCont
 
 ##Logistic Model
 
-First using our raw features.
-
-```{r}
-
-start.time <- Sys.time()  #measure how much time it takes
-
-#register cluster
-cluster <- makeCluster(detectCores() - 1) # convention to leave 1 core for OS
-registerDoParallel(cluster)
-
-#train a logistic model with caret:
-glm_model = caret::train(
-  form = is_churn ~.,
-  data = churn_train,
-  trControl = control,
-  method = "glm",   
-  family = "binomial"
-)
-
-#de-register parallel processing cluster:
-stopCluster(cluster)
-registerDoSEQ()     #forces R to return to single-thread processing
-
-
-#measure passed time:
-end.time <- Sys.time()
-end.time - start.time
-
-
-## EVALUATION on test data
-#make predictions, using the generated model, on test data
-glm_prediction <- predict(glm_model, churn_test)
-#create "confusion matrix": Calculates a cross-tabulation of observed and predicted classes with associated statistics.
-glm.cm <- confusionMatrix(glm_prediction, churn_test$is_churn)
-glm.cm
-
-```
-
-Then using our PCA-transformed feature variables:
-
-```{r}
-
-#train a logistic model with caret:
-glm.pca_model = caret::train(
-  form = is_churn ~.,
-  data = train.pca,
-  trControl = control,
-  method = "glm",   #linear logistic model (Change this later)
-  family = "binomial",
-  metric = "ROC"
-)
-
-## EVALUATION on test data
-#make predictions, using the generated model, on test data
-glm.pca_prediction = predict(glm.pca_model, test.pca)
-#create "confusion matrix": Calculates a cross-tabulation of observed and predicted classes with associated statistics.
-glm.pca.cm <- confusionMatrix(glm.pca_prediction, test.pca$is_churn)
-glm.pca.cm
-
-```
-
-
 ##LDA model:
-
-
-[Linear discriminant analysis](https://en.wikipedia.org/wiki/Linear_discriminant_analysis): 
-
-```{r}
-
-#train a LDA model with caret:
-LDA_model = caret::train(
-  is_churn ~.,
-  data = churn_train,
-  trControl = control,
-  method = "lda"
-)
-
-
-#Predicted classes:
-lda_prediction <- predict(LDA_model, churn_test)
-
-#confusion matrix:
-lda.cm <- confusionMatrix(lda_prediction, churn_test$is_churn)
-lda.cm
-
-
-
-```
-
-
-Then using our PCA-transformed feature variables:
-
-```{r}
-
-
-#train a LDA model with caret:
-LDA.pca_model = caret::train(
-  is_churn ~.,
-  data = train.pca,
-  trControl = control,
-  method = "lda"
-)
-
-
-#Predicted classes:
-lda.pca_prediction <- predict(LDA.pca_model, test.pca)
-
-#confusion matrix:
-lda.pca.cm <- confusionMatrix(lda.pca_prediction, test.pca$is_churn)
-lda.pca.cm
-
-```
-
 
 ##QDA model:
 
-```{r}
-
-#train a QDA model:
-QDA_model = caret::train(
-  is_churn ~. ,
-  data = churn_train,
-  trControl = control,
-  method = "qda"   
-)
-
-#Predicted classes:
-qda_prediction <- predict(QDA_model, churn_test)
-
-#confusion matrix:
-qda.cm <- confusionMatrix(qda_prediction, churn_test$is_churn)
-qda.cm
-
-```
-
-
-Then using our PCA-transformed feature variables:
-
-```{r}
-
-#train a QDA model:
-QDA.pca_model = caret::train(
-  is_churn ~. ,
-  data = train.pca,
-  trControl = control,
-  method = "qda"   
-)
-
-#Predicted classes:
-qda.pca_prediction <- predict(QDA.pca_model, test.pca)
-
-#confusion matrix:
-qda.pca.cm <- confusionMatrix(qda.pca_prediction, test.pca$is_churn)
-qda.pca.cm
-
-```
-#Random Forest:
-
-Finally, we train a random forest (only with PCA features):
-
-```{r}
-set.seed(7313)
-### Random forests, with sqrt(p) features per tree, 10 trees and principal components ##
-rf.fit.pca <- caret::train(is_churn~., 
-                      data=train.pca, 
-                      method='rf', 
-                      ntree = 10,
-                      trControl= control )
-
-#calculate training accuracy
-#pred = predict(rf.fit.pca, train.pca)
-#confusionMatrix(pred, train.pca$is_churn)
-#accuracy is 0.9588
-#calculate test accuracy
-rf.pca.cm <- confusionMatrix(predict(rf.fit.pca, test.pca), test.pca$is_churn)
-rf.pca.cm
-#accuracy is ~75% on test data 
-
-```
-
+##Random Forest:
 
 
 
 #Comparison of Models
 
 Using the models, we can see that QDA (both using all variables and using PCA variables) generally scores high on sensitivity (the true positive rate, TPR), while Logistic and LDA models score high on Specificity (True Negative Rate, TNR). However, Random forest, seems to do best on both metrics, and therefore does best with ROC. Furthermore, we can see RF does best for accuracy as well. Thus, we choose our **Random Forest** model.
-
-```{r}
-
-
-# Evaluate logit, lda and qda models with full features / with 
-results = resamples(list(
-  logit = glm_model, logitPCA = glm.pca_model, 
-  lda = LDA_model, ldaPCA = LDA.pca_model, 
-  qda = QDA_model, qdaPCA = QDA.pca_model,
-  RF = rf.fit.pca))
-#Plot 
-dotplot(results, main = "Model Metrics")
-#plot Accuracies
-dotplot(c(qda = qda.cm$overall[1],qdaPCA =qda.pca.cm$overall[1],
-          lda = lda.cm$overall[1],ldaPCA = lda.pca.cm$overall[1],
-          logit = glm.cm$overall[1], logitPCA = glm.pca.cm$overall[1],
-          RF = rf.pca.cm$overall[1]), xlab = "Accuracy", main = "Accuracies by Model")
-
-
-
-```
-
 
 Thus, we choose the **Random Forest** (using PCA with *some* dimension reduction) as our best model.
 
@@ -435,37 +344,9 @@ Finally, we can evaluate the impact of our model, making a few (unrealistic) sim
 
 We can see the results of our chosen model (Random Forest), when applied to test data:
 
-```{r, echo = F, warning = F, message = F}
-rf.pca.cm
-
-mydb <- dbConnect(MySQL(), dbname = "ToyStorey", host = 'db.cfda.se', 
-                port = 3306, user = "toystorey", password = "toys@sse") 
-```
-
 As we can see, when our model predicts "churn", it is correct ~70% of the time (the *Positive Pred Value*, or Correct # churn / Total pred churn). So out of 1000 new customers that are predicted as "churn", ~700 can be expected to actually churn.
 
 From the database we can calculate the sum of sales and the average sales per customer (of ALL sales, not just the first stale), grouped by those customers that churn vs those that are loyal.
-
-
-```{sql connection=mydb}
-
-SELECT is_churn, SUM(sales) AS SumSales, AVG(sales) AS AvgSales, COUNT(*) AS Freq
-FROM 
-(SELECT Receipt.customer_id, 
-    t.is_churn,
-    SUM(IFNULL(Product.price, 0)) AS sales,
-    COUNT(ReceiptProduct.receipt_id) AS num_sold_items
-FROM Receipt
-LEFT JOIN ReceiptProduct 
-	ON (Receipt.receipt_id = ReceiptProduct.receipt_id)
-LEFT JOIN Product
-	ON (ReceiptProduct.product_id = Product.product_id)
-LEFT JOIN (SELECT customer_id, IF(COUNT(*) = 1, 1, 0) AS is_churn FROM Receipt GROUP BY customer_id) t 
-    ON (Receipt.customer_id = t.customer_id)
-GROUP BY customer_id) innerquery
-GROUP BY is_churn;
-
-```
 
 Therefore, for every customer we can retain, we expect on average to make **212 SEK** more (the average loyal customer has average sales of 255 SEK while the average churner has average sales of 43 SEK). Therefore, if retention costs are below 212 SEK per customer retained, we can expect a positive net result. For the following value impact, though, **we'll assume it costs nothing to retain a customer, and retaining an identified churner is 100% certain** (not realistic, adjust later):
 

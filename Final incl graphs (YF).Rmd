@@ -24,6 +24,8 @@ library(xgboost) #?
 library(fastDummies) #to gen dummies real fast
 library(scales) # for fixing 5E+03 etc to 5000
 library(expss) # for mean_if etc (graphs)
+library(tidyr) # for slope graphs
+library(pROC) # for ROC
 
 
 # Set decimals limit
@@ -383,6 +385,7 @@ smalltrain <- df_train[smallIndex,]
 rf.model = caret::train(form = target_customer ~  purchase_amount + merchant_id + trueBirthyear + trueGender_male + AvgSales + month + sweden + norway + TotalSales +NumberPurchases ,
   data = smalltrain, trControl = trainControl(method = "cv", number = 5), method = "rf")  
 #91% accuracy, 90% specificity, 95% sensitivity
+rf.pred <- predict(rf.model,df_test)
 rf.cm.train <- confusionMatrix(predict(rf.model, df_train), df_train$target_customer, positive = "is_target")
 rf.cm.test <- confusionMatrix(predict(rf.model, df_test), df_test$target_customer, positive = "is_target")
 rf.cm.train # training accuracy 91%, kappa 76%, sensitivity 92%, specificity 87%
@@ -406,6 +409,7 @@ set.seed(7313)
 modelxgboost <- caret::train(form = target_customer ~  purchase_amount + merchant_id + trueBirthyear + trueGender_male + AvgSales + month + sweden + norway + TotalSales +NumberPurchases, data = smalltrain,
   trControl = trainControl(method = "cv", number = 5, savePredictions = T, classProbs = T),
   method = "xgbTree", tuneGrid = parametersGrid) 
+xgb.pred <- predict(modelxgboost,df_test)
 xgb.cm.train <- confusionMatrix(predict(modelxgboost, df_train), 
                                 df_train$target_customer, positive = "is_target")
 xgb.cm.test <- confusionMatrix(predict(modelxgboost, df_test), 
@@ -419,18 +423,109 @@ xgb.cm.test
 
 ## 2.5 Visualisation of models performance
 
+Table based on prediction on test data.
+```{r}
+acc <- cbind(glm.test$overall[1],lda.test$overall[1],qda.test$overall[1],
+             rf.cm.test$overall[1],xgb.cm.test$overall[1])
+kappa <- cbind(glm.test$overall[2],lda.test$overall[2],qda.test$overall[2],
+             rf.cm.test$overall[2],xgb.cm.test$overall[2])
+sens <- cbind(glm.test$byClass[1],lda.test$byClass[1],qda.test$byClass[1],rf.cm.test$byClass[1],xgb.cm.test$byClass[1])
+spec <- cbind(glm.test$byClass[2],lda.test$byClass[2],qda.test$byClass[2],rf.cm.test$byClass[2],xgb.cm.test$byClass[2])
+
+
+model_summary <- rbind(acc,kappa,sens,spec)
+colnames(model_summary) <- c("Logit", "LDA", "QDA", "R. Forest", "XgBoost")
+print(model_summary)
+```
+
+```{r}
+acc.train <- rbind(glm.train$overall[1],lda.train$overall[1],
+                   qda.train$overall[1],rf.cm.train$overall[1],
+                   xgb.cm.train$overall[1])
+kapp.train <- rbind(glm.train$overall[2],lda.train$overall[2],
+                   qda.train$overall[2],rf.cm.train$overall[2],
+                   xgb.cm.train$overall[2])
+acc.test <- rbind(glm.test$overall[1],lda.test$overall[1],qda.test$overall[1],rf.cm.test$overall[1],xgb.cm.test$overall[1])
+kapp.test <- rbind(glm.test$overall[2],lda.test$overall[2],qda.test$overall[2],rf.cm.test$overall[2],xgb.cm.test$overall[2])
+
+slope_acc <- data.frame(model=c("Logit","LDA","QDA","R. Forest","XgBoost"), train=acc.train, test=acc.test)
+colnames(slope_acc) <- c("model","test","train")
+slope_acc <- slope_acc %>% gather(2:3,key=dataset,value=accuracy)
+
+ggplot(slope_acc,aes(x=dataset,y=accuracy,group=model)) +
+  geom_line() +
+  geom_point() +
+  scale_x_discrete(limits=c("train","test")) +
+  coord_cartesian(ylim=c(.74,.91)) +
+  annotate(geom = "text", x="test", y=acc.train[1], label="Logit",hjust=-.2) +
+  annotate(geom = "text", x="test", y=acc.train[2], label="LDA",hjust=-.2) +
+  annotate(geom = "text", x="test", y=acc.train[3], label="QDA",hjust=-.2) +
+  annotate(geom = "text", x="train", y=acc.train[4], label="R. Forest",hjust=-.2) +
+  annotate(geom = "text", x="test", y=acc.train[5], label="XgBoost",hjust=-.2)
+  
+```
+```{r}
+slope_kapp <- data.frame(model=c("Logit","LDA","QDA","R. Forest","XgBoost"), train=kapp.train, test=kapp.test)
+colnames(slope_kapp) <- c("model","test","train")
+slope_kapp <- slope_kapp %>% gather(2:3,key=dataset,value=accuracy)
+
+ggplot(slope_kapp,aes(x=dataset,y=accuracy,group=model)) +
+  geom_line() +
+  geom_point() +
+  scale_x_discrete(limits=c("train","test")) +
+  coord_cartesian(ylim=c(.36,.77)) +
+  annotate(geom = "text", x="test", y=kapp.train[1], label="Logit",hjust=-.2) +
+  annotate(geom = "text", x="test", y=kapp.train[2], label="LDA",hjust=-.2) +
+  annotate(geom = "text", x="test", y=kapp.train[3], label="QDA",hjust=-.2) +
+  annotate(geom = "text", x="train", y=kapp.train[4], label="R. Forest",hjust=-.2) +
+  annotate(geom = "text", x="test", y=kapp.train[5], label="XgBoost",hjust=-.2)
+```
+
 - __Slope graph with training and test accuracy of all models__
 
 Drop a couple models on the basis of this graph.
-
 
 
 - __Slope graph with training and test kappa of all models__
 
 Drop some more.
 
+```{r}
+sens.train <- cbind(glm.train$byClass[1],lda.train$byClass[1],qda.train$byClass[1],rf.cm.train$byClass[1],xgb.cm.train$byClass[1])
+models <- c("Logit","LDA","QDA","R. Forest","XgBoost")
+plot_sens <- data.frame(sens[1,],sens.train[1,],models)
+colnames(plot_sens) <- c("sensitivity_test", "sensitivity_train","model")
 
+ggplot(plot_sens,aes(x=model))+
+  geom_point(aes(y=sensitivity_train),col="#5DADE2",size=4)+
+  geom_point(aes(y=sensitivity_test),col="#BA4A00",size=4)+
+  geom_segment(aes(x=model, xend=model,
+               y=min(sensitivity_test), yend=max(sensitivity_test)),
+               linetype="dashed",
+               size=0.1) +
+  labs(title = "Sensitivity",
+       x = "Model", y="Sensitivity") +
+  coord_flip()
 
+```
+
+```{r}
+spec.train <- cbind(glm.train$byClass[2],lda.train$byClass[2],qda.train$byClass[2],rf.cm.train$byClass[2],xgb.cm.train$byClass[2])
+models <- c("Logit","LDA","QDA","R. Forest","XgBoost")
+plot_spec <- data.frame(spec[1,],spec.train[1,],models)
+colnames(plot_spec) <- c("specificity_test", "specificity_train","model")
+
+ggplot(plot_spec,aes(x=model))+
+  geom_point(aes(y=specificity_train),col="#5DADE2",size=4)+
+  geom_point(aes(y=specificity_test),col="#BA4A00",size=4)+
+  geom_segment(aes(x=model, xend=model,
+               y=min(specificity_test), yend=max(specificity_test)),
+               linetype="dashed",
+               size=0.1) +
+  labs(title = "Specificity", x= "Model", y="Specificity") +
+  coord_flip()
+
+```
 - __Dotplot with sensitivity and specificity of all models__
 
 And drop, drooop!
@@ -439,9 +534,23 @@ And drop, drooop!
 
 - __Some other graph?__
 
-
+I did some graphs comparing the test data with the predicted data, maybe that? 
 
 - __ROC curve of our final model, or max our final two__
+
+ROC/AUC of Random Forest and XgBoost.
+```{r}
+
+plot.roc(ifelse(df_test$target_customer=="is_target",1,0),ifelse(rf.pred=="is_target",1,0),percent=T,main="ROC, Random Forest Model")
+print(auc(ifelse(df_test$target_customer=="is_target",1,0),ifelse(rf.pred=="is_target",1,0),percent=T,main="ROC, Random Forest Model"))
+
+```
+```{r}
+
+plot.roc(ifelse(df_test$target_customer=="is_target",1,0),ifelse(xgb.pred=="is_target",1,0),percent=T,main="ROC, XgBoost Model")
+print(auc(ifelse(df_test$target_customer=="is_target",1,0),ifelse(xgb.pred=="is_target",1,0),percent=T,main="ROC, XgBoost Model"))
+
+```
 
 Comment on the tradeoff exhibited.
 

@@ -1,0 +1,474 @@
+---
+title: "iZettle Business Use Case"
+author: "V. Farinelli, Y. Forsberg, M. Kaplanova, N. Mimms"
+output: 
+  pdf_document:
+    toc: true
+---
+
+```{r global options, include=FALSE}
+knitr::opts_chunk$set(fig.width=7, fig.height=5, warning=FALSE, message=FALSE)
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = T)
+library(RMySQL)   #MySQL interaction
+library(dplyr)    #data handling
+library(caret)    #classification and regression training
+library(ggplot2)   #for graphs
+library(magrittr)  #for pipes
+library(parallel)  #parallel processing for model training
+library(doParallel) #ditto
+library(corrplot) # for corr matrix
+library(xgboost) #?
+library(fastDummies) #to gen dummies real fast
+library(scales) # for fixing 5E+03 etc to 5000
+library(expss) # for mean_if etc (graphs)
+
+
+# Set decimals limit
+options(digits = 3)
+
+#SQL connection:
+sql_con = dbConnect(MySQL(), dbname = "IZettle", host = "db.cfda.se", 
+                port = 3306, user = "toystorey", password = "toys@sse")  
+```
+
+# 1 Introduction 
+
+In this report, our objective is to identify and present a business use case model which can successfully guide iZettle in its perspective business expansion. The intention of iZettle is to find potential customers within the toy retail industry, which has recently been rocked by the exit of one of its biggest players, TopToy, on the physical market, and by the ever-increasing dominance of Amazon on the online market. Within this turbulent climate, it is likely that small but well-established online toy retailers based in the Nordics will find it profitable to venture into the physical market. Given their relatively small size in the online market, they are destined to remain in a position of price-takers. On the other hand, now that TopToy no longer represents a source of competition, setting a brick-and-mortar toy store could allow such retailers to gain the upper-hand. Specifically, by playing on the community-based, family-owned nature of their business, they could attract a loyal local clientele and therefore increase profitability.
+With this knowledge, iZettle foresees a promising business opportunity in offering its trademark payment solutions to some of these stores. In the Nordics, there are currently 12 small online toy stores that could potentially decide to go physical; of course, it is expected that only some of them possess the requisites to do so profitably, and it is iZettle's intention to identify them. We have therefore undertaken the task to guide iZettle in the selection of the most appropriate and promising partners.
+In order to do so, we have used a large dataset comprising both accounting data and transactions data from the twelve stores, spanning on a period between 2014 and 2016. Before discussing our data, however, let us introduce the business use case that will guide our analysis.
+
+# 1.1 Business use case
+
+Our scope is to devise a model that can be useful to predict a store's future profitability, were it to set up a physical location. The data that we have available consists of records of each store's past online transactions, with information on both the nature of the transaction and of the customer performing it. Therefore, the first milestone is to establish a pattern of transition between online and physical profitability: namely, how does an online clientele convert into a physical one?
+Our first step is to assume that each store would set its hypothetical brick-and-mortar store in a location that is close to the majority of its customers. That sounds fairly reasonable of an assumption, if we suppose that our stores are profit-maximising.
+Secondly, we assume that some customers possess an intrinsic intention to shop online, determined by a, so to speak, "sedentary" nature. Specifically, we theorise that customers using a desktop (rather than a more mobile device) for an online purchase exhibit most clearly this sedentarity. That is because the use of a desktop computer indicates that the online purchase was performed likely in an indoor, familiar environment (such as a home or a office or some other location with access to the internet), and with a higher deliberation than for an "on-the-go" purchase (such as, e.g., someone buying online on their phone right after seeing an item in a store while window-shopping). Based on this assumption, we expect that customers who have *never* performed transactions with a mobile device (i.e. any device other than a desktop) are unlikely to shop at the respective physical store, were it to be opened. REFERENCES?
+Thirdly, we assume that, while some of the customers in our database are loyal to a specific store, and intend to return for their future purchases of toys, some other customers purchased casually and with no specific intention to return (perhaps they merely stumbled upon a given store while looking for a product online, or by following an ad). In this case more than ever, it is important to distinguish loyal and churn customers. Indeed, if we are to predict a store's profitability once it goes physical, we have to imagine that some of the customers that have performed these online transactions will find out or figure out the new development, and transition to be *physical* customers as well, out of an intrinsic sense of loyalty. At the end of the day, we cannot predict a store's profitability from the new clientele that it will acquire in loco; first, because our data does not provide us with any information to do so, and second, because we would need to make strong assumptions on the physical store's hypothetical location (in a central high street? in an industrial area?...). Therefore, our prediction will be based on the store's current online customers, and we must infer on both their store loyalty and their preference for in-store shopping.
+Lastly, we must assume that, once a store's profitability has been established, its intention to set up a brick-and-mortar operation follows suit. This is because we imagine that each store possess as much or more information than we do, with regards to its clientele characteristics and potential profitability. Of course, some stores may have not (yet) initiated an analysis to explore their potential to go physical, and have therefore not yet reached such a conclusion. However, if approached by iZettle with knowledge of their actual potential and an offer to partner up, it is likely that the stores would embrace the suggestion. All things considered, there must be some deliberation between the actions undertaken so far by these online stores, and it cannot just be a random coincidence that some stores possess a certain type of clientele rather than others!
+
+With these premises and assumptions, we reiterate that our business use case consists in an effort to predict each toy store's *potential* profitability once it goes physical, on the basis of its current online clientele. To do so, we endeavour to perform a customer-level analysis (on the whole ensemble of customers from all twelve stores), where we model a customer's likelihood to shop at a brick-and-mortar store on the basis of his or her characteristics. Once we establish the impact of each characteristic on customer behaviour, we can define a store's success by looking at the incidence of such characteristic within its customer base.
+
+Therefore, our __target__ is a variable which incorporates both customer loyalty and customer attitude to in-store shopping. Namely, it is a __binary variable that equals 1 if a customer has made more than one purchase (from a given store?) *and* simultaneously has used a mobile (i.e. non-desktop) device at least once__.
+
+Here is a summary of the possible cases of `target_customer`. For a given customer,
+
+- If no. purchases > 1 & no. non-desktop purchases >= 1, __`target_customer` = 1__
+
+- If no. purchases = 1 & no. non-desktop purchases >= 1, __`target_customer` = 0__
+
+- If no. purchases > 1 & no. non-desktop purchases = 0, __`target_customer` = 0__
+
+## 1.2 Data exploration
+
+The data on transactions, accessible from the `IZettleOrder` table, is what we will use throughout most of this report. Our initial step is therefore to fetch the table from SQL and load the data aggregating the variables at customer level for all distinct 673813 customers.
+
+```{r}
+# Establish MySQL connection:
+sql_con = dbConnect(MySQL(), dbname = "IZettle", host = "db.cfda.se", 
+                port = 3306, user = "toystorey", password = "toys@sse") 
+# Fetch entire Order table
+query <- 'SELECT * FROM IZettleOrder;'
+data <- fetch(dbSendQuery(sql_con,query), n=-1)
+
+# Load Customer aggregates (like "Group by") for all customers
+customers <- data %>% 
+  group_by(cid) %>%  
+  summarise(NumberPurchases = n(), TotalSales = sum(as.numeric(purchase_amount)), AvgSales = mean(as.numeric(purchase_amount)),
+            #Genders
+            nGender = n_distinct(gender), Male = sum(gender == "male"), Female = sum(gender == "female"),
+            #Birthyears - paste together the different values for one customer
+            nBirthyear = n_distinct(birthyear), Birth = toString(unique(birthyear)),
+            #At least one mobile purchase:
+            nonDesktopPurchases = sum(target == "0", na.rm = T))
+```
+
+To begin with, we conduct an exploration of our dataset and gather some preliminary facts.
+
+- There is not much inter-store competition: 668,106 individual customers shopped at 1 store, 5667 at 2 stores, 40 at 3 stores. None shopped at more than 3.
+
+- 6 companies are Swedish, 3 Finnish, 3 Norwegian. 
+
+- Each store only lists one type of currency in transactions. Also, all of the customers only use one currency. Overall, there are no international transactions (???). Therefore, currency information is superfluous, once we know the country of the customer and of the store.
+
+- Large purchase amounts tend to be performed on desktop only. 
+
+- Some merchants (2756123, 4218266, 5913810, 6394740, and 9402067) only have non-desktop purchases.
+
+- *Some customers have missing gender and/or birthyear; also, some customers tend to perform unusually high and frequent transactions.*
+
+This last discovery calls for a more in-depth analysis of these genderless/birthless customers. First, we observe that some of these customers have a blank birthyear (gender) for some transactions but have a complete birthyear (gender) for some others. Therefore, we fill in these values wherever we have this possibility.
+
+```{r}
+# Fix genders (1836 have "none" plus the real gender):
+customers$trueGender <- case_when(
+  customers$Male > 0 ~ "male",
+  customers$Female > 0 ~ "female",
+  TRUE ~ "none"   #else it stays "none"
+  )
+# Fix Birthyears (204 have "" plus their true birthyear)
+customers$trueBirthyear <- stringr::str_extract(customers$Birth, "[[:digit:]]+")
+#Join Customer characteristics onto main dataset:
+data <- left_join(data, customers[,c("cid","trueBirthyear", "trueGender", "NumberPurchases","TotalSales","AvgSales","nonDesktopPurchases")], by = "cid")
+
+cust_groups <- matrix(c(sum(customers$trueGender=="male")+sum(customers$trueGender=="female"),sum(customers$trueGender=="none"),length(customers$trueBirthyear) - sum(is.na(customers$trueBirthyear)), sum(is.na(customers$trueBirthyear))), nrow=2)
+colnames(cust_groups) <- c("Gender","Birthyear")
+rownames(cust_groups) <- c("Exists (Consumers)","None (Business")
+print(cust_groups)
+```
+
+However, there still remains a rather large group that are either genderless or both genderless and birthless. 
+Our assumption is that customers with missing information about gender and age are likely to be corporate customers, such as companies or stores ("B2B"). We believe that, in order for this assumption to hold true, the two variables should not be systematically missing (e.g. if it were the case that only some merchants do not record them at all), and they should be missing simultaneously (i.e. when `gender = "none"`, `birthyear = ""`). Also, our assumption is reinforced by the fact that most of these customers appear to have unusually high and frequent purchases, exceeding the "reasonable" levels expected for a retail customer buying for his or her own consumption.
+
+With this in mind, we turn to the data. Customers with both missing `gender` and `birthyear` are present for nearly all merchants, i.e. 10 of them, while at the same time all merchants have at least some customers with complete `gender` and `birthyear`; therefore, the blanks are not due to a systematic choice to omit the information. 
+We also notice that if a customer's `birthyear` is missing, `gender` is too. But not the other way around: namely, one merchant only (merchant 2723490) reports, for some customers, information on the `birthyear` but not on the `gender.` This would seemingly point to a systematic practice of the merchant in question. Glimpsing at all customers of the merchant in question, however, we discover that not all of its customers have missing `gender` (namely, 8914 are classified as male, and 16784 as female). Then, this is not a systematic omission of gender data on the part of the merchant. Also, looking at the sum and no. of purchases by these customers, we get the idea that they are still to be considered corporate customers. Perhaps then, the merchant in question compels online buyers to report age (including, absurdly, corporates), or perhaps, `birthyear` here indicates the year of foundation of the corporate customer.
+
+Therefore, we resolve to exclude these corporate customers from our dataset as well as from our analysis. The reason for this is two-fold; first, it is a straightforward way to deal with the missing values of two variables which we consider important for model estimation. Second, because of their very nature (buying in large quantity, in order to resell in their own stores), corporate customers are unlikely to forgo their online purchases in favour of visiting a brick-and-mortar store. Therefore, including them would be out of the scope of our business use case.
+Additionally, we impose that the total sum of purchases performed by any given customer (i.e. even with complete gender/age) must be below a fixed threshold of 1,500,000 SEK, in order to exclude any corporate customers that may initially appear as retail customers (i.e. if they have given gender and age information at the time of purchase). This threshold was defined through a reiterative process, sorting customers by total purchases and eyeballing the level at which only retail customers remained.
+
+
+# 2 Methods
+
+## 1.3 Target and features
+
+We proceed to identify and create our target variable (`target_customer`). As described above, this is a binary variable that equals one if the customer has performed at least one mobile purchase (non-desktop) *and* simultaneously has made more than one purchase in general *and*, lastly, whose total purchases (over the period considered) do not exceed the threshold defined for corporate customers. We filter out observations for which the target missing (as well as the corporate customers, as anticipated above). For better versatility in the models we will construct, we transform our target into a categorical variable with two possible values, "is_target" and "no_target". Lastly, for each customer, we retain only the first transaction - given that our intended observation units are customers, but the original dataset is compiled for transactions.
+
+```{r}
+# Create target: "target_customer"
+mult_customers <- filter(customers, NumberPurchases > 1) %>% select(cid) #customer IDs who have bought multiple
+data$target_customer <- ifelse(data$nonDesktopPurchases > 0 & data$cid %in% mult_customers$cid & data$TotalSales < 1500000, 1, 0)
+# filter out missing targets and B2B customers             
+data2 <- filter(data, !is.na(target) & !is.na(trueBirthyear) & trueGender!= "none") 
+#keep only first obsevation 
+data2$datestamp %<>% as.Date()  #turn into date
+df_final <- data2 %>%
+  group_by(cid) %>%
+  arrange(datestamp) %>%
+  dplyr::slice(1L) #keep first row in grouped, arranged dataset
+# transform target variable into factor 
+df_final$target_customer = as.factor(ifelse(df_final$target_customer == 1, "is_target", "no_target"))
+df_final$target_customer <- as.factor(ifelse(df_final$target_customer==1,"is_target","no_target"))
+
+cust_groups_b <- matrix(c(nrow(filter(customers, NumberPurchases > 1, !is.na(trueBirthyear) & trueGender!="none") %>% select(cid)),nrow(filter(customers, nonDesktopPurchases > 0 & TotalSales < 1500000 & !is.na(trueBirthyear) & trueGender!="none") %>% select(cid)), sum(data$target_customer)),nrow=1)
+colnames(cust_groups_b) <- c("Loyal Customers", "Non Desktop Customers", "Target Customers") 
+rownames(cust_groups_b) <- " "
+print(cust_groups_b)
+
+#Fix NAs (check NAS)
+#sapply(df_final, function(x) sum(is.na(x)))
+#df_final[is.na(df_final)] <- 0                 # DELETE THESE THREE ROWS
+```
+
+We move on to define and create the features that we will use in our models:
+
+- `purchase_amount`: the amount spent by the customer in his or her first purchase, in SEK. We expect this to be positively correlated to being in the *is_target* group.
+
+- `trueBirthyear`: the year of birth of the customer. We expect this to be negatively correlated to being in the *is_target* group, since a smaller value corresponds to an older customer, who is more likely to be store-loyal and less likely to engage in purposefully sedentary online shopping such as using a desktop (although this is somewhat open to debate).
+
+- `trueGender_male`: the gender of a customer, namely a dummy which equals one if the customer is male. Here, the direction of the effect is not clear a priori, but with a scatterplot we have identified it to be... 
+
+- `NumberPurchases`: the total number of purchases performed by the customer throughout the period considered. This will blatantly be positively correlated to being in the *is_target* group, since the more purchases the more a customer is to be considered loyal.
+
+- `TotalSales`: the total amount spent by the customer across all their purchases throughout the period considered. We also expect this to be positively correlated to being in the *is_target* group.
+
+- `AvgSales`: average amount spent per purchase (for non-returning customer == purchase_amount)  (+ effect: more spending, more likely to come back) 
+
+- `month`: month of the year in which the customer's first purchase was made. This is likely to be negatively correlated to the *is_target* group, since, if the first purchase happened later in the year, there is a shorter timespan left within the period for the customer to return. However, this is open to debate.
+
+- `sweden` and `norway`: two dummies representing the country of the customer. The base category is Finland, which is of course excluded in order to avoid perfect collinearity.
+
+
+
+```{r}
+factorcols <- c("id","cid","currency","birthyear","gender","merchant_id","country","device","target","trueGender","trueBirthyear")
+df_final[factorcols] <- lapply(df_final[factorcols], factor) 
+df_final$purchase_amount %<>% as.numeric()
+df_final$NumberPurchases %<>% as.numeric()
+df_final$TotalSales %<>% as.numeric()
+df_final$AvgSales %<>% as.numeric()
+df_final$month <- lubridate::month(df_final$datestamp)
+df_final$month %<>% as.factor()
+#df_final$trueBirthyear %<>% as.numeric() %>% as.factor()
+df_final$sweden <- as.factor(ifelse(df_final$country == "se", 1, 0))
+df_final$norway <- as.factor(ifelse(df_final$country == "no", 1, 0))
+df_final$trueBirthyear %<>% as.numeric()
+df_final <- dummy_cols(df_final, select_columns = "trueGender", remove_selected_columns = FALSE,
+                     remove_first_dummy = TRUE) # trueGender_male
+
+```
+
+Let us now verify that there are no hints of imperfect collinearity among our features, since that would lead to large standard errors and unstable estimates. In the __correlation matrix__ reported below, the darkest blue dots represent correlation of 1, and they are indeed to be found all along the diagonal (corresponding to the correlation of each variable with itself); 
+
+```{r echo=FALSE}
+corrplot(cor(df_final[sapply(df_final, is.numeric)]))
+```
+
+
+```{r}
+#remove some vars:
+df_final$datestamp <- NULL
+df_final$currency <- NULL
+df_final$device <- NULL
+df_final$target <- NULL
+df_final$gender <- NULL
+df_final$birthyear <- NULL
+df_final$country <- NULL
+df_final$nonDesktopPurchases <- NULL
+```
+
+## 1.3.b Data visualisation 
+
+(Please note; In all graphs the sales figures have been divided by 100 to express them in kr and cents.)
+
+```{r}
+# other_features <- c("trueGender","month")
+
+#for(i in other_features) {
+#plot(df_final[[i]],
+#main = as.character(i),
+#xlab = "Feature",
+#ylab = " ")
+#}
+
+```
+
+```{r}
+cavg <- "#85C1E9"
+ctot <- "#0E6655"
+
+ggplot(df_final,aes(x=month))+
+  geom_bar(stat="identity",aes(y=TotalSales/100), fill=ctot, alpha=0.5, width=.5) +
+  geom_bar(stat="identity",aes(y=AvgSales/100), fill=cavg, alpha=.5, width=.5) +
+  labs(title= "Total and Average Sales by month of first purchase") +
+    scale_y_continuous(name="Total/Average sales", labels = comma)
+
+```
+
+```{r}
+
+fem_sales <- subset(df_final, df_final$trueGender=="female")
+mal_sales <- subset(df_final,df_final$trueGender=="male")
+
+ggplot(df_final, aes(month)) +
+  geom_point(aes(month, AvgSales/100), data=fem_sales, colour="#F39C12") +
+  geom_point(aes(month,AvgSales/100),data=mal_sales, colour="#7D3C98", alpha=.2)+
+  labs(title="Average sales by month of first purchase" ,
+  subtitle= "split by gender",
+       x= "Month") +
+  scale_y_continuous(name="Average sales", labels = comma)
+
+## Can obviously also add a TotalSales (I did that first but I think AvgSales makes more sense)
+## I didn't wanna mess with df_final, but there would def be a point to having dates instead? 
+
+```
+
+```{r}
+avg_byear <- c(1:99)
+for(i in 1:99) {
+  avg_byear[i] <- mean_if(df_final$trueBirthyear== i, df_final$AvgSales)
+}
+
+tot_byear <- c(1:99)
+for(i in 1:99) {
+  tot_byear[i] <- mean_if(df_final$trueBirthyear== i, df_final$TotalSales)
+}
+byear <- na.omit(data.frame(c(1:99),avg_byear, tot_byear))
+colnames(byear) <- c("Year","Average","Total")
+
+ggplot(byear,aes(x=Year))+
+  geom_point(aes(y=Average),col=cavg) +
+  geom_smooth(aes(y=Average), method=loess, col=cavg, alpha=.5) +
+  geom_point(aes(y=Total),col=ctot) +
+  geom_smooth(aes(y=Total), method=loess,col=ctot, alpha=.5) +
+  labs(title="Mean Average/Total Sales by birthyear", x= "Birthyear(19XX)")
+    scale_y_continuous(name="Average/Total sales", labels = comma)
+    
+```
+
+- Scatterplots with features vs target, to look at the expected impact (I don't have any good ideas what to do with the target//Ylva)
+
+- What other nice graphs did Nick put in his assignment? It's somewhere in the folder.
+
+- Maybe something looking at seasonality.
+
+
+
+```{r}
+# CAN I REMOVE THIS CODE CHUNK ??????
+
+#Write CSVs for IBM machine learning:
+#write.csv(df_final, "IBMizettleFULL.csv")
+#smallSampleIndex <- createDataPartition(df_final$target_customer, p = 0.05, list = F)
+#smallSample <- df_final[smallSampleIndex,]
+#write.csv(smallSample, "IBMizettleSMALL.csv")
+```
+
+Lastly, we split our data evenly along the dependent variable, creating a training set and a test set, with a 70-30 ratio. We will only use the training set in order to estimate our models, but we will evaluate model accuracy separately for both training and test data. This will allow us to verify if there is overfitting.
+
+```{r}
+set.seed(7313)
+training.indices <- createDataPartition(df_final$target_customer, p = 0.7, list = F)
+df_train <- df_final[training.indices,] #training set
+df_test <- df_final[-training.indices,] #test set
+```
+
+
+
+## 2.2 Modelling: Logit
+
+Our modelling starts with a logit specification (trained with caret) where we include all the features mentioned in section 1.3. The logit model performs reasonably well, with training accuracy at 87%; however, that needs to be cautioned with the knowledge that the No-Information Rate is also high, at 77%. Therefore, looking at the Kappa can be more indicative, and since it is at 59%, we think it preferable to keep searching for better-performing models. Also, we notice that specificity is very high at 96%, but at the expense of a poor tradeoff with sensitivity, which is only 58%. Only 48265 out of 83664 actual target customers get correctly predicted, and since predicting them is the main objective of our model, the bad performance of this measure weighs relatively much.
+When evaluating the model on test data, however, we are brightened by the fact that all these measures remain changed (when we only look at the first two decimal digits, there is zero change). Therefore, this is at least a model that does not suffer from overfitting.  
+
+
+```{r}
+set.seed(7313)
+glm.model <- caret::train(form = target_customer ~ purchase_amount + merchant_id + trueBirthyear + trueGender_male + AvgSales + month + sweden + norway + TotalSales +NumberPurchases ,
+  data = df_train,
+  trControl = trainControl(method = "cv", number = 5, classProbs = T, summaryFunction = twoClassSummary), method = "glm", family = "binomial")
+pred = predict(glm.model, df_train)
+glm.train <- confusionMatrix(pred, df_train$target_customer)
+glm.test <- confusionMatrix(predict(glm.model, df_test), df_test$target_customer)
+# training accuracy 87%, kappa 59%, sensitivity 58%, specificity 96%
+# test accuracy 87%, kappa 59%, sensitivity 58%, specificity  96%
+```
+
+
+## 2.2 Modelling: LDA
+
+Our modelling continues with an LDA specification (trained with caret) where we include all the features mentioned in section 1.3. The LDA unfortunately performs worse than the previous specification, with lower training accuracy at 83% (but No-Information Rate still at 77%!), and therefore lower Kappa at 40%. Similarly, while the specificity remains rather high at 98%, the sensitivity is noticeably lower, at only 33%: implying that only x out of 83664 actual target customers get correctly predicted, which is a disappointing result. Just as noticed for the previous model, the LDA model at least does not suffer from overfitting, since the performance remains unchanged (when looking at the first two decimal figures only) when it gets evaluated on test data.
+
+
+```{r}
+#train a LDA model with caret:
+set.seed(7313)
+lda.model <- caret::train(form = target_customer ~ purchase_amount + merchant_id + trueBirthyear + trueGender_male + AvgSales + month + sweden + norway + TotalSales +NumberPurchases ,
+  data = df_train,
+  trControl = trainControl(method = "cv", number = 5, classProbs = T, summaryFunction = twoClassSummary),method = "lda")   
+lda.train <- confusionMatrix(predict(lda.model, df_train), df_train$target_customer, positive = "is_target")
+lda.test <- confusionMatrix(predict(lda.model, df_test), df_test$target_customer, positive = "is_target")
+# training accuracy 83%, kappa 40%, sensitivity 33%, specificity 98%
+# test accuracy 83%, kappa 40%, sensitivity 33%, specificity 98%
+```
+
+
+## 2.3 Modelling: QDA
+
+We now turn to train a QDA model, using caret and including all the features mentioned in section 1.3, except three (namely, `AvgSales`, `sweden` and `norway`, all of which would otherwise give rise to issues of collinearity within the group "no_target"). This specification performs better than the previous ones under certain aspects, and worse under other aspects. Namely, training accuracy has worsened, reaching a low of 76% (and the No-Information Rate is ????); however, the Kappa is 41%, which is just as in the LDA (or marginally better). Specificity has similarly lowered with respect to the previous model, reaching a low of 68%. However, sensitivity has much improved, and it has reached a high of 79%, which indicates a rather good predicting power of this model. Lastly, just as the previous two, the QDA model seemingly does not suffer from overfitting, since the performance remains unchanged when it gets evaluated on test data (except for a minimal decrease in the Kappa).
+
+
+```{r}
+#train a QDA model with caret:
+#NOTE: "AvgSales","sweden", and "norway" were removed for collinearity within group nontarget.
+set.seed(7313)
+qda.model <- caret::train(form = target_customer ~ purchase_amount + merchant_id+ trueBirthyear + month + trueGender_male + TotalSales +NumberPurchases, data = df_train,
+  trControl = trainControl(method = "cv", number = 5),   method = "qda")
+qda.train <- confusionMatrix(predict(qda.model, df_train), df_train$target_customer, positive = "is_target")
+qda.test <- confusionMatrix(predict(qda.model, df_test), df_test$target_customer, positive = "is_target")
+# training accuracy 76%, kappa 41%, sensitivity 79%, specificity 68%
+# test accuracy 76%, kappa 40%, sensitivity 79%, specificity 67%
+```
+
+## 2.4 Modelling: Random Forests
+
+Next, we train a Random Forests model, using caret and including all the features mentioned in section 1.3. This specification proved to be by far the best-performing one until now. Firstly, both training accuracy and kappa are higher, respectively at 91% and 73%. The No-Information rate has????. Secondly, the tradeoff between sensitivity and specificity has finally reversed, meaning that sensitivity has now surpassed specificity, although the latter still remains high at 87%. However, sensitivity is now at its highest, 92%, and a staggering number of true target customers get correctly predicted (x out of y). Lastly, when evaluating this model on test data we see more of a change in the measures than we did for previous specifications, but they are only minimal changes (e.g. the kappa goes from 76% to 73%).
+
+
+```{r}
+#train a Random Forest model with caret:
+set.seed(7313)
+smallIndex <- createDataPartition(df_train$target_customer, p = 0.1, list = F)   #run RF on a SMALLER 10% subset (for speed...)
+set.seed(7313)
+smalltrain <- df_train[smallIndex,]
+rf.model = caret::train(form = target_customer ~  purchase_amount + merchant_id + trueBirthyear + trueGender_male + AvgSales + month + sweden + norway + TotalSales +NumberPurchases ,
+  data = smalltrain, trControl = trainControl(method = "cv", number = 5), method = "rf")  
+#91% accuracy, 90% specificity, 95% sensitivity
+rf.cm.train <- confusionMatrix(predict(rf.model, df_train), df_train$target_customer, positive = "is_target")
+rf.cm.test <- confusionMatrix(predict(rf.model, df_test), df_test$target_customer, positive = "is_target")
+rf.cm.train # training accuracy 91%, kappa 76%, sensitivity 92%, specificity 87%
+rf.cm.test # test accuracy 90%, kappa 73%, sensitivity 91%, specificity 86%
+```
+
+## 2.5 XGboosted Tree
+
+```{r}
+##XGBoosted Tree : 
+#https://analyticsdataexploration.com/xgboost-model-tuning-in-crossvalidation-using-caret-in-r/
+parametersGrid <-  expand.grid(eta = 0.1, 
+                            colsample_bytree=c(0.5,0.7),
+                            max_depth=c(3,6),
+                            nrounds=100,
+                            subsample =  c(0.5, 1),
+                            gamma=1,
+                            min_child_weight=2
+                            )
+set.seed(7313)
+modelxgboost <- caret::train(form = target_customer ~  purchase_amount + merchant_id + trueBirthyear + trueGender_male + AvgSales + month + sweden + norway + TotalSales +NumberPurchases, data = smalltrain,
+  trControl = trainControl(method = "cv", number = 5, savePredictions = T, classProbs = T),
+  method = "xgbTree", tuneGrid = parametersGrid) 
+xgb.cm.train <- confusionMatrix(predict(modelxgboost, df_train), 
+                                df_train$target_customer, positive = "is_target")
+xgb.cm.test <- confusionMatrix(predict(modelxgboost, df_test), 
+                               df_test$target_customer, positive = "is_target")
+xgb.cm.train
+xgb.cm.test
+# training accuracy %, kappa %, specificity %, sensitivity %
+# test accuracy %, kappa %, specificity %, sensitivity %
+```
+
+
+## 2.5 Visualisation of models performance
+
+- __Slope graph with training and test accuracy of all models__
+
+Drop a couple models on the basis of this graph.
+
+
+
+- __Slope graph with training and test kappa of all models__
+
+Drop some more.
+
+
+
+- __Dotplot with sensitivity and specificity of all models__
+
+And drop, drooop!
+
+
+
+- __Some other graph?__
+
+
+
+- __ROC curve of our final model, or max our final two__
+
+Comment on the tradeoff exhibited.
+
+
+
+At the end of the day, our scope is to retain the model with the highest prediction capacity. Inference is also somewhat relevant, of course, because correctly estimating the impact of the various characteristics is essential in order to be able to use them to predict the outcome of the "average customer" for each toy store. However, inference is not our main objective, since we are not eventually interested in isolating the causal impact of the characteristics, but rather in exploiting their correlation/causation for predictive purposes. 
+A good tradeoff between sensitivity and specificity - PLEASE CORRECT ME IF I'M WRONG - is therefore what we are mostly aiming for in selecting our model.
+
+
+
+
+
+```{r}
+# Look at variable importance:
+varimp <- varImp(rf.model)
+varimp
+z <- varimp$importance
+z$percent <- as.numeric(z$Overall / sum(z$Overall))
+z
+#z$percent
+```
+
+
+
+
+```{r echo = F, eval = T, warning = F, message = F}
+
+
+```
+

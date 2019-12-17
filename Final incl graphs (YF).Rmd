@@ -246,6 +246,9 @@ ggplot(df_final,aes(x=month))+
     scale_y_continuous(name="Total/Average sales", labels = comma)
 
 ```
+(Blue is the average sales  per month of first purchase, and green is the total sales
+per month of first purchase. Both are divided by 100 to be 100,50 rather than 10 050)
+
 
 ```{r}
 
@@ -264,6 +267,9 @@ ggplot(df_final, aes(month)) +
 ## I didn't wanna mess with df_final, but there would def be a point to having dates instead? 
 
 ```
+(This is the same average sales as in the last graph, but for each customer and split
+by gender. Orange is female customers and purple is male customers.)
+
 
 ```{r}
 avg_byear <- c(1:99)
@@ -283,10 +289,13 @@ ggplot(byear,aes(x=Year))+
   geom_smooth(aes(y=Average), method=loess, col=cavg, alpha=.5) +
   geom_point(aes(y=Total),col=ctot) +
   geom_smooth(aes(y=Total), method=loess,col=ctot, alpha=.5) +
-  labs(title="Mean Average/Total Sales by birthyear", x= "Birthyear(19XX)")
-    scale_y_continuous(name="Average/Total sales", labels = comma)
+  labs(title="Mean Average/Total Sales by birthyear", x= "Birthyear(19XX)", y="Sales")
+    scale_y_continuous(name="Sales", labels = comma)
     
 ```
+(This graph plots the average (blue) and total (green) sales for customers per 
+birthyear. It also includes a trend line with standard deviation.)
+
 
 - Scatterplots with features vs target, to look at the expected impact (I don't have any good ideas what to do with the target//Ylva)
 
@@ -541,14 +550,12 @@ I did some graphs comparing the test data with the predicted data, maybe that?
 ROC/AUC of Random Forest and XgBoost.
 ```{r}
 
-plot.roc(ifelse(df_test$target_customer=="is_target",1,0),ifelse(rf.pred=="is_target",1,0),percent=T,main="ROC, Random Forest Model")
-print(auc(ifelse(df_test$target_customer=="is_target",1,0),ifelse(rf.pred=="is_target",1,0),percent=T,main="ROC, Random Forest Model"))
+plot.roc(ifelse(df_test$target_customer=="is_target",1,0),ifelse(rf.pred=="is_target",1,0),percent=T,main="ROC, Random Forest Model", print.auc=TRUE)
 
 ```
 ```{r}
 
-plot.roc(ifelse(df_test$target_customer=="is_target",1,0),ifelse(xgb.pred=="is_target",1,0),percent=T,main="ROC, XgBoost Model")
-print(auc(ifelse(df_test$target_customer=="is_target",1,0),ifelse(xgb.pred=="is_target",1,0),percent=T,main="ROC, XgBoost Model"))
+plot.roc(ifelse(df_test$target_customer=="is_target",1,0),ifelse(xgb.pred=="is_target",1,0),percent=T,main="ROC, XgBoost Model", print.auc=TRUE)
 
 ```
 
